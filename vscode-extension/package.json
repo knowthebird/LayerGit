@@ -1,0 +1,209 @@
+{
+  "name": "layergit-vscode",
+  "displayName": "LayerGit",
+  "description": "Thin VS Code UI over the LayerGit CLI.",
+  "version": "0.0.1",
+  "publisher": "layergit",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:layergit.layers",
+    "onView:layergit.composedTree",
+    "onCommand:layergit.refresh",
+    "onCommand:layergit.init",
+    "onCommand:layergit.explainCurrentFile"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "LayerGit",
+      "properties": {
+        "layergit.command": {
+          "type": "string",
+          "default": "layer",
+          "description": "LayerGit CLI command. Use \"python3 -m layergit.cli\" for local development if layer is not installed."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "layergit",
+          "title": "LayerGit",
+          "icon": "media/layergit-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "layergit": [
+        {
+          "id": "layergit.layers",
+          "name": "Layers"
+        },
+        {
+          "id": "layergit.composedTree",
+          "name": "Composed Tree"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "layergit.refresh",
+        "title": "LayerGit: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "layergit.init",
+        "title": "LayerGit: Initialize Workspace"
+      },
+      {
+        "command": "layergit.pullAll",
+        "title": "LayerGit: Pull All Layers"
+      },
+      {
+        "command": "layergit.addLayer",
+        "title": "LayerGit: Add Layer",
+        "icon": "$(add)"
+      },
+      {
+        "command": "layergit.removeLayer",
+        "title": "LayerGit: Remove Layer",
+        "icon": "$(remove)"
+      },
+      {
+        "command": "layergit.explainCurrentFile",
+        "title": "LayerGit: Explain Current File"
+      },
+      {
+        "command": "layergit.explainFile",
+        "title": "LayerGit: Explain File"
+      },
+      {
+        "command": "layergit.enableLayer",
+        "title": "LayerGit: Enable Layer"
+      },
+      {
+        "command": "layergit.disableLayer",
+        "title": "LayerGit: Disable Layer"
+      },
+      {
+        "command": "layergit.moveLayerUp",
+        "title": "LayerGit: Move Layer Up"
+      },
+      {
+        "command": "layergit.moveLayerDown",
+        "title": "LayerGit: Move Layer Down"
+      },
+      {
+        "command": "layergit.sendLayerToTop",
+        "title": "LayerGit: Send Layer to Top"
+      },
+      {
+        "command": "layergit.sendLayerToBottom",
+        "title": "LayerGit: Send Layer to Bottom"
+      },
+      {
+        "command": "layergit.useLayerForFile",
+        "title": "LayerGit: Use Layer for File"
+      },
+      {
+        "command": "layergit.useLayerForFolder",
+        "title": "LayerGit: Use Layer for Folder Recursively"
+      },
+      {
+        "command": "layergit.openManifest",
+        "title": "LayerGit: Open Manifest"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "layergit.refresh",
+          "when": "view == layergit.layers || view == layergit.composedTree",
+          "group": "navigation"
+        },
+        {
+          "command": "layergit.init",
+          "when": "view == layergit.layers",
+          "group": "navigation"
+        },
+        {
+          "command": "layergit.addLayer",
+          "when": "view == layergit.layers",
+          "group": "navigation"
+        },
+        {
+          "command": "layergit.removeLayer",
+          "when": "view == layergit.layers",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "layergit.enableLayer",
+          "when": "view == layergit.layers && viewItem == layergit.layer.disabled",
+          "group": "inline"
+        },
+        {
+          "command": "layergit.disableLayer",
+          "when": "view == layergit.layers && viewItem == layergit.layer.enabled",
+          "group": "inline"
+        },
+        {
+          "command": "layergit.removeLayer",
+          "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
+          "group": "inline"
+        },
+        {
+          "command": "layergit.moveLayerUp",
+          "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
+          "group": "movement"
+        },
+        {
+          "command": "layergit.moveLayerDown",
+          "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
+          "group": "movement"
+        },
+        {
+          "command": "layergit.sendLayerToTop",
+          "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
+          "group": "movement"
+        },
+        {
+          "command": "layergit.sendLayerToBottom",
+          "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
+          "group": "movement"
+        },
+        {
+          "command": "layergit.explainFile",
+          "when": "view == layergit.composedTree && viewItem == layergit.file",
+          "group": "inline"
+        },
+        {
+          "command": "layergit.useLayerForFile",
+          "when": "view == layergit.composedTree && viewItem == layergit.file",
+          "group": "precedence"
+        },
+        {
+          "command": "layergit.useLayerForFolder",
+          "when": "view == layergit.composedTree && viewItem == layergit.directory",
+          "group": "precedence"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.92.0",
+    "typescript": "^5.5.4"
+  }
+}

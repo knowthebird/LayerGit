@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# LayerGit generated workspace data
+.layer/
+buildtree/
+layer.lock.yaml
+exports/
+.layer-exports/
+merged-project/
+merged-*/
+tmp/
+scratch/
+
+# Local test/demo generated repos
+demo-workspace/
+test-workspace/
+tmp-repos/
+.local-repos/
+workspaces/
+local-workspaces/
+manual-test-workspaces/
+.tmp-layergit/
+fixtures/tmp/
+tests/tmp/
+tests/fixtures/tmp/
+
+# VS Code extension build/dependencies
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/.vscode-test/
+vscode-extension/*.vsix
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Patch/bundle artifacts that may contain local data
+*.bundle
+*.patch
+
+# OS/editor
+.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
