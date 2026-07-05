@@ -20,7 +20,7 @@ the topmost enabled layer wins by default and lower copies are masked. Those
 masked copies are not deleted; they are recorded as provenance so the generated
 tree is explainable instead of mysterious.
 
-Users can also make explicit per-file exceptions with `layer usefile`, choosing
+Users can also make explicit per-file exceptions with `layer use`, choosing
 which layer/repo should provide a path even when another layer would normally
 mask it. That means the workspace is not just a blind flattening operation: it is
 a selected composition of files from multiple repos.
@@ -95,9 +95,9 @@ cd my-layergit-workspace
 layer init --output ./buildtree
 
 # Add layers from bottom priority to top priority.
-layer add ../repo-a --name product
-layer add ../repo-b --name component-b
-layer add ../repo-c --name component-c
+layer add ../repo-a product
+layer add ../repo-b component-b
+layer add ../repo-c component-c
 
 layer status
 ```
@@ -111,8 +111,9 @@ layergit status
 python3 -m layergit.cli status
 ```
 
-If `--name` is omitted, LayerGit infers a safe layer name from the repo path or
-URL. Only Git-tracked files from cached layer repos are composed by default.
+If the optional layer name is omitted, LayerGit infers a safe layer name from the
+repo path or URL. Only Git-tracked files from cached layer repos are composed by
+default.
 
 ## Common Workflows
 
@@ -127,9 +128,9 @@ passthrough:
 
 ```bash
 $EDITOR .layer/cache/component-b/common/util.c
-layer git component-b status
-layer git component-b add common/util.c
-layer git component-b commit -m "Fix shared utility"
+layer -L component-b git status
+layer -L component-b git add common/util.c
+layer -L component-b git commit -m "Fix shared utility"
 ```
 
 Recompose the generated tree from local cached repos:
@@ -137,6 +138,15 @@ Recompose the generated tree from local cached repos:
 ```bash
 layer compose
 layer status
+```
+
+By default, `layer compose` writes current composed files, removes files LayerGit
+previously owned but no longer composes, and preserves unknown files in
+`buildtree/`, such as compiler outputs or IDE artifacts. Use the explicit clean
+mode only when you want to rebuild the output tree from scratch:
+
+```bash
+layer compose --clean
 ```
 
 Fetch or pull layers from their remotes and then recompose:
@@ -149,12 +159,21 @@ layer pull component-b
 Select which layer provides one overlapping file:
 
 ```bash
-layer usefile component-b common/util.c
+layer use common/util.c component-b
 layer explain common/util.c
 ```
 
 This pins `common/util.c` to `component-b` even if a higher layer also provides
 that path. The rest of the tree still follows normal layer order.
+
+Move a layer in the stack with `layer move <layer> <position>`:
+
+```bash
+layer move component-b up
+layer move component-b down
+layer move component-b top
+layer move component-b bottom
+```
 
 Temporarily hide or re-enable a layer without deleting its manifest entry or
 cached repo:
@@ -177,16 +196,17 @@ layer export ./merged-project --init-git
 LayerGit does not replace Git. It scopes Git.
 
 - Use normal Git inside `.layer/cache/<layer>/` if needed.
-- Prefer `layer git <layer> <git-command>` from the workspace root.
+- Prefer `layer -L <layer> git <git-command>` from the workspace root.
 - Do not edit or commit from `buildtree/`; it is generated output.
 - Run `layer compose` to regenerate `buildtree/` from the current cached layer
-  repos without fetching remotes.
+  repos without fetching remotes. Existing buildtree files are preserved unless
+  you run `layer compose --clean`.
 
 ## Examples
 
 See [examples/](examples/) for local, network-free demos. The overlap demo builds
 two temporary Git repositories with the same `common/util.c`, composes them, shows
-top-layer-wins provenance, switches the visible file with `layer usefile`, and
+top-layer-wins provenance, switches the visible file with `layer use`, and
 exports the result.
 
 ```bash
@@ -201,7 +221,7 @@ The VS Code extension provides a LayerGit Activity Bar view with:
 - Composed Tree
 - file provenance through `layer explain`
 - layer enable/disable actions
-- file selection through `layer usefile`
+- file selection through `layer use`
 
 ![LayerGit VS Code extension example](docs/vs-code-example.gif)
 
@@ -213,7 +233,7 @@ CLI:
 - File details call `layer explain <file> --json` and write provenance details to
   the **LayerGit** output channel.
 - File and folder context actions can persist layer selections through
-  `layer usefile`.
+  `layer use`.
 
 ### Run The Extension Locally
 

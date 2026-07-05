@@ -138,7 +138,7 @@ layer disable
 layer enable
 layer status
 layer pull
-layer git
+layer -L <layer> git
 layer explain
 layer merge
 layer export
@@ -149,15 +149,15 @@ File-level precedence commands should also exist because they map to familiar vi
 ```bash
 layer raise <layer> <file>
 layer lower <layer> <file>
-layer sendtotop <layer> <file>
-layer sendtobottom <layer> <file>
+layer use <file> <layer>
+layer unuse <file>
 ```
 
 Principle:
 
 ```text
 Common layer workflows get direct commands.
-Uncommon Git workflows go through `layer git`.
+Uncommon Git workflows go through `layer -L <layer> git`.
 ```
 
 This avoids recreating all of Git.
@@ -170,7 +170,7 @@ During early Python prototyping, it is acceptable for commands to be run as:
 
 ```bash
 python3 -m layergit.cli init
-python3 -m layergit.cli add ./fixtures/repo-a --name product
+python3 -m layergit.cli add ./fixtures/repo-a product
 python3 -m layergit.cli status
 ```
 
@@ -178,7 +178,7 @@ However, that should be treated as a development/testing invocation, not the int
 
 ```bash
 layer init
-layer add ./fixtures/repo-a --name product
+layer add ./fixtures/repo-a product
 layer status
 ```
 
@@ -226,7 +226,7 @@ layer pull 1
 layer pull 2..4
 layer pull 1,3,4
 layer pull common
-layer git component-b status
+layer -L component-b git status
 ```
 
 Avoid requiring a `#` character in commands because shells and documentation can make that awkward.
@@ -242,7 +242,7 @@ Recommended selector behavior:
 | `1,3,4` | Explicit layer list |
 | `common` | Layer by name |
 
-By default, commands that operate on composition should use enabled layers only. Commands that manage layer records, such as `layer status`, `layer enable`, `layer disable`, `layer remove`, and `layer git`, should still be able to reference disabled layers by name or index.
+By default, commands that operate on composition should use enabled layers only. Commands that manage layer records, such as `layer status`, `layer enable`, `layer disable`, `layer remove`, and `layer -L <layer> git`, should still be able to reference disabled layers by name or index.
 
 Suggested selector behavior for disabled layers:
 
@@ -320,8 +320,8 @@ layer commit common -m "Fix utility"
 or use the passthrough:
 
 ```bash
-layer git common status
-layer git common commit -m "Fix utility"
+layer -L common git status
+layer -L common git commit -m "Fix utility"
 ```
 
 ### Cached layer repositories
@@ -356,18 +356,18 @@ Layer common changed outside the layer CLI. Recompose the workspace before build
 The preferred way to run normal Git commands is through:
 
 ```bash
-layer git <selector> <git-command> [git-args...]
+layer -L <selector> git <git-command> [git-args...]
 ```
 
 Examples:
 
 ```bash
-layer git common status
-layer git common log --oneline
-layer git common checkout feature/foo
-layer git common commit -m "Fix shared code"
-layer git all fetch --prune
-layer git 2..4 status
+layer -L common git status
+layer -L common git log --oneline
+layer -L common git checkout feature/foo
+layer -L common git commit -m "Fix shared code"
+layer -L all git fetch --prune
+layer -L 2..4 git status
 ```
 
 This preserves the full power of Git while keeping the target layer explicit.
@@ -636,10 +636,10 @@ Add a new layer. This should be used for the first layer and later layers.
 Examples with explicit names:
 
 ```bash
-layer add git@example.com/repo-a.git --name product
-layer add git@example.com/repo-b.git --name component-b
-layer add git@example.com/repo-c.git --name component-c
-layer add git@example.com/repo-d.git --name common --top
+layer add git@example.com/repo-a.git product
+layer add git@example.com/repo-b.git component-b
+layer add git@example.com/repo-c.git component-c
+layer add git@example.com/repo-d.git common --top
 ```
 
 Examples using inferred names:
@@ -650,7 +650,7 @@ layer add git@example.com/common.git --top
 layer add ../local-common-repo
 ```
 
-If `--name` is not provided, the tool should infer a default layer name from the repository name. This keeps the first-use experience simple.
+If the optional name argument is not provided, the tool should infer a default layer name from the repository name. This keeps the first-use experience simple.
 
 Recommended inference rules:
 
@@ -680,15 +680,15 @@ Source: git@example.com/team/common.git
 Users can still override the inferred name:
 
 ```bash
-layer add git@example.com/team/common.git --name common-vendor
+layer add git@example.com/team/common.git common-vendor
 ```
 
 Positioning examples:
 
 ```bash
-layer add git@example.com/repo-d.git --name common --after 3
-layer add git@example.com/repo-d.git --name common --before component-c
-layer add ../local-common-repo --name common --top
+layer add git@example.com/repo-d.git common --after 3
+layer add git@example.com/repo-d.git common --before component-c
+layer add ../local-common-repo common --top
 layer add git@example.com/repo-d.git --after 3
 layer add git@example.com/repo-d.git --before component-c
 layer add ../local-common-repo --top
@@ -696,7 +696,7 @@ layer add ../local-common-repo --top
 
 Default behavior should probably be:
 
-1. Infer a layer name if `--name` was not provided.
+1. Infer a layer name if the optional name argument was not provided.
 2. Add layer to manifest with `enabled: true`.
 3. Clone or register source repo into `.layer/cache/<layer-name>/`.
 4. Recompose `buildtree/`.
@@ -705,7 +705,7 @@ Useful options:
 
 ```bash
 layer add <repo>
-layer add <repo> --name <name>
+layer add <repo> <name>
 layer add <repo> --before <selector>
 layer add <repo> --after <selector>
 layer add <repo> --top
@@ -716,7 +716,7 @@ layer add <repo> --no-compose
 
 Name collision safety:
 
-- If the user provides `--name` and that name already exists, fail with a clear error unless a future `--rename-if-needed` option is added.
+- If the user provides the optional name argument and that name already exists, fail with a clear error unless a future `--rename-if-needed` option is added.
 - If the name is inferred and already exists, automatically append the next numeric suffix.
 - Numeric suffixes should use the normalized base name, not the full URL.
 
@@ -871,18 +871,18 @@ After pulling enabled layers, recompose the output tree. Pulling only disabled l
 
 ---
 
-### `layer git`
+### `layer -L <layer> git`
 
 Generic passthrough for normal Git commands.
 
 Examples:
 
 ```bash
-layer git common status
-layer git common log --oneline
-layer git component-b checkout feature/my-branch
-layer git all fetch --prune
-layer git 2..4 status
+layer -L common git status
+layer -L common git log --oneline
+layer -L component-b git checkout feature/my-branch
+layer -L all git fetch --prune
+layer -L 2..4 git status
 ```
 
 This avoids creating dozens of wrapper commands.
@@ -890,10 +890,10 @@ This avoids creating dozens of wrapper commands.
 Potential behavior:
 
 ```bash
-layer git <selector> <git-command> [git-args...]
+layer -L <selector> git <git-command> [git-args...]
 ```
 
-If selector expands to multiple layers, run command once per layer and prefix output with the layer name. `layer git` should allow disabled layers to be selected because it targets the underlying repo, not the composed output.
+If selector expands to multiple layers, run command once per layer and prefix output with the layer name. `layer -L <layer> git` should allow disabled layers to be selected because it targets the underlying repo, not the composed output.
 
 ---
 
@@ -951,36 +951,31 @@ Reason:
 
 ---
 
-### File precedence commands: `raise`, `lower`, `sendtotop`, `sendtobottom`
+### File selection commands: `use`, `unuse`
 
-By default, when the same output path exists in multiple layers, the topmost layer wins and lower-layer versions are masked. Users should be able to change file-level precedence without moving an entire layer.
+By default, when the same output path exists in multiple layers, the topmost layer wins and lower-layer versions are masked. Users should be able to select which layer provides an individual file without moving an entire layer.
 
-These commands are intentionally named like familiar visual layer tools:
+The public commands are:
 
 ```bash
-layer sendtotop <layer> <file>
-layer sendtobottom <layer> <file>
-layer raise <layer> <file>
-layer lower <layer> <file>
+layer use <file> <layer>
+layer unuse <file>
 ```
 
 Examples:
 
 ```bash
-layer sendtotop common common/util.c
-layer lower common common/util.c
-layer raise component-b common/util.c
-layer sendtobottom component-c common/util.c
+layer use common/util.c common
+layer use common/util.c component-b
+layer unuse common/util.c
 ```
 
 Meaning:
 
 | Command | Behavior |
 |---|---|
-| `sendtotop` | Make this layer's version of the file highest priority for that file path |
-| `sendtobottom` | Make this layer's version of the file lowest priority for that file path |
-| `raise` | Move this layer's version of the file up one file-precedence step |
-| `lower` | Move this layer's version of the file down one file-precedence step |
+| `use` | Select a layer as the provider for the file path |
+| `unuse` | Remove the explicit file selection and return to normal precedence |
 
 These commands should affect only the named file path, not the layer's global position.
 
@@ -998,7 +993,7 @@ and all three of `component-b`, `component-c`, and `common` contain `common/util
 This command:
 
 ```bash
-layer sendtotop component-b common/util.c
+layer use common/util.c component-b
 ```
 
 should make `component-b` the visible owner for `common/util.c` only. Other files should continue to follow normal global layer order.
@@ -1192,10 +1187,10 @@ The order is bottom-to-top for that file path only. In the example above, `commo
 The file precedence commands update this section:
 
 ```bash
-layer sendtotop common common/util.c
+layer use common/util.c common
 layer lower common common/util.c
 layer raise component-b common/util.c
-layer sendtobottom component-c common/util.c
+layer unuse common/util.c
 ```
 
 Potential later additions:
@@ -1428,7 +1423,7 @@ The tool should suggest possible fixes:
 
 ```text
 Options:
-  1. Use layer sendtotop <layer> <file> to choose a visible owner
+  1. Use layer use <file> <layer> to choose a visible owner
   2. Use layer raise/lower to adjust file-level precedence
   3. Exclude one source file from a layer
   4. Rename/remap one file
@@ -1665,8 +1660,8 @@ layer enable <layer>
 layer disable <layer>
 layer raise <layer> <file>
 layer lower <layer> <file>
-layer sendtotop <layer> <file>
-layer sendtobottom <layer> <file>
+layer use <file> <layer>
+layer unuse <file>
 ```
 
 Useful command runner actions:
@@ -1675,7 +1670,7 @@ Useful command runner actions:
 layer init
 layer pull
 layer pull <layer>
-layer git <layer> status
+layer -L <layer> git status
 ```
 
 The extension should call the installed `layer` command by default. During development, it may support a configurable fallback command such as:
@@ -1938,7 +1933,7 @@ A useful extension prototype should pass these scenarios:
 4. Composed Tree view displays files from `buildtree/`.
 5. Selecting or right-clicking a file can run `layer explain <file> --json`.
 6. File detail shows visible layer and masked layers.
-7. Right-clicking a file can call `layer raise`, `layer lower`, `layer sendtotop`, and `layer sendtobottom` where supported by the CLI.
+7. Right-clicking a file can call `layer use <file> <layer>` where supported by the CLI.
 8. Right-clicking a layer can enable or disable it.
 9. After an action completes, both views refresh.
 10. If no `layer.yaml` exists, the extension shows an Initialize Workspace action.
@@ -2061,7 +2056,7 @@ Expected:
 ### Test 2: Add first layer
 
 ```bash
-layer add ./fixtures/repo-a --name product
+layer add ./fixtures/repo-a product
 layer status
 ```
 
@@ -2071,7 +2066,7 @@ Expected:
 - Repo is registered/cloned into cache.
 - Files appear in `buildtree/`.
 
-### Test 3: Infer layer names when `--name` is omitted
+### Test 3: Infer layer names when the optional name argument is omitted
 
 ```bash
 layer add ./fixtures/repo-a
@@ -2085,13 +2080,13 @@ Expected:
 - Second layer gets a numeric suffix, such as `repo-a-2`.
 - Cache paths use the final layer names.
 - The generated names are printed to the user.
-- If the user explicitly provides an already-used `--name`, the command fails instead of silently renaming it.
+- If the user explicitly provides an already-used the optional name argument, the command fails instead of silently renaming it.
 
 ### Test 4: Add overlapping layers with default top-wins behavior
 
 ```bash
-layer add ./fixtures/repo-b --name component-b
-layer add ./fixtures/repo-c --name component-c
+layer add ./fixtures/repo-b component-b
+layer add ./fixtures/repo-c component-c
 ```
 
 If both provide `common/util.c`, expected:
@@ -2106,7 +2101,7 @@ If both provide `common/util.c`, expected:
 With `common/util.c` provided by `component-b`, `component-c`, and `common`, run:
 
 ```bash
-layer sendtotop component-b common/util.c
+layer use common/util.c component-b
 ```
 
 Expected:
@@ -2215,7 +2210,7 @@ git status
 Expected:
 
 - `buildtree/` is not a Git repo unless created by `layer export --init-git`.
-- Users are directed to `layer status`, `layer explain`, or `layer git <layer> ...` for layer-aware operations.
+- Users are directed to `layer status`, `layer explain`, or `layer -L <layer> git ...` for layer-aware operations.
 
 ### Test 12: Workspace `.gitignore` hygiene
 
@@ -2261,11 +2256,11 @@ Expected:
 layer init --output ./buildtree
 
 # Add layers from bottom to top
-# --name is optional; without it, names are inferred from repo names.
-layer add git@example.com/product.git --name product
+# name is optional; without it, names are inferred from repo names.
+layer add git@example.com/product.git product
 layer add git@example.com/component-b.git
 layer add git@example.com/component-c.git
-layer add git@example.com/common.git --name common --top
+layer add git@example.com/common.git common --top
 
 # Check the composed workspace
 layer status
@@ -2278,7 +2273,7 @@ layer tree --json
 layer explain common/util.c
 
 # Choose a different layer's version of one file
-layer sendtotop component-b common/util.c
+layer use common/util.c component-b
 
 # Temporarily hide a layer without deleting it
 layer disable component-c
@@ -2298,13 +2293,13 @@ layer export ./merged-project --init-git
 Build the smallest CLI that can:
 
 1. Initialize a workspace.
-2. Add local Git repos as layers, including inferred default names when `--name` is omitted.
+2. Add local Git repos as layers, including inferred default names when the optional name argument is omitted.
 3. Create/update a safe workspace `.gitignore`.
 4. Compose Git-tracked files into `buildtree/` by default.
 5. Detect duplicate-path conflicts.
 6. Apply default top-layer-wins masking for same-path overlaps.
 7. Support `layer disable <layer>` and `layer enable <layer>` so layers can be hidden without deletion.
-8. Support one file precedence command such as `layer sendtotop <layer> <file>`.
+8. Support one file precedence command such as `layer use <file> <layer>`.
 9. Explain file provenance.
 10. Export the composed tree.
 11. Provide `--json` output for `status`, `tree`, and `explain` so a VS Code extension can consume the CLI.

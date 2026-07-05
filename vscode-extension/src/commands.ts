@@ -77,16 +77,16 @@ export function registerCommands(
       await setLayerEnabled(cli, node, false, refresh);
     }),
     vscode.commands.registerCommand('layergit.moveLayerUp', async (node?: LayerItem) => {
-      await moveLayer(cli, node, 'moveup', refresh);
+      await moveLayer(cli, node, 'up', refresh);
     }),
     vscode.commands.registerCommand('layergit.moveLayerDown', async (node?: LayerItem) => {
-      await moveLayer(cli, node, 'movedown', refresh);
+      await moveLayer(cli, node, 'down', refresh);
     }),
     vscode.commands.registerCommand('layergit.sendLayerToTop', async (node?: LayerItem) => {
-      await moveLayer(cli, node, 'sendlayertotop', refresh);
+      await moveLayer(cli, node, 'top', refresh);
     }),
     vscode.commands.registerCommand('layergit.sendLayerToBottom', async (node?: LayerItem) => {
-      await moveLayer(cli, node, 'sendlayertobottom', refresh);
+      await moveLayer(cli, node, 'bottom', refresh);
     }),
     vscode.commands.registerCommand('layergit.useLayerForFile', async (node?: FileNode) => {
       await useLayerForFile(cli, node, refresh);
@@ -115,7 +115,7 @@ async function addLayer(cli: LayerGitCli, refresh: () => void): Promise<void> {
   });
   const args = ['add', repo];
   if (name) {
-    args.push('--name', name);
+    args.push(name);
   }
   await runCliAction(cli, workspace, args, refresh);
 }
@@ -167,7 +167,7 @@ async function moveLayer(
   if (!workspace || !node) {
     return;
   }
-  await runCliAction(cli, workspace, [command, node.layer.name], refresh);
+  await runCliAction(cli, workspace, ['move', node.layer.name, command], refresh);
 }
 
 async function useLayerForFile(
@@ -199,7 +199,7 @@ async function useLayerForFile(
     vscode.window.showWarningMessage(`Layer ${picked.layer.name} is disabled. Enable it before selecting it for a file.`);
     return;
   }
-  await runCliAction(cli, workspace, ['usefile', picked.layer.name, node.file.path], refresh);
+  await runCliAction(cli, workspace, ['use', node.file.path, picked.layer.name], refresh);
 }
 
 async function useLayerForFolder(
@@ -232,7 +232,7 @@ async function useLayerForFolder(
   let failures = 0;
   for (const file of files) {
     try {
-      await cli.run(workspace, ['usefile', layerName, file.file.path]);
+      await cli.run(workspace, ['use', file.file.path, layerName]);
     } catch (error) {
       failures += 1;
       const message = error instanceof Error ? error.message : String(error);

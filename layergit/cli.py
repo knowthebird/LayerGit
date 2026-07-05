@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .composer import compose, file_providers
+from .composer import compose
 from .errors import LayerError
 from .exporter import export_workspace
 from .gitops import layer_cache_path, remove_cache, sync_layer
@@ -33,9 +33,94 @@ from .reports import (
 from .selectors import insertion_index, select_layers
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="layer", description="Compose layered Git workspaces.")
-    sub = parser.add_subparsers(dest="command", required=True)
+PUBLIC_COMMANDS = {
+    "help",
+    "init",
+    "add",
+    "remove",
+    "move",
+    "enable",
+    "disable",
+    "status",
+    "compose",
+    "tree",
+    "pull",
+    "list",
+    "git",
+    "explain",
+    "use",
+    "unuse",
+    "merge",
+    "export",
+}
+
+
+HELP_DESCRIPTION = """LayerGit composes layered Git repositories into one generated workspace."""
+
+
+def format_layer_help(prog: str) -> str:
+    return f"""usage: {prog} [-h] [-L <layer>] <command> [<args>]
+
+LayerGit composes layered Git repositories into one generated workspace.
+
+These are common LayerGit commands used in various situations:
+
+Workspace:
+  status              Show workspace and layer status
+  compose             Regenerate the composed output tree
+  compose --clean     Remove the output tree and regenerate from scratch
+  tree                Show the composed tree
+
+Layer management:
+  init                Create a new LayerGit workspace
+  add <repo> [name]   Add a repo as a layer
+  remove <layer>      Remove a layer
+  move <layer> <pos>  Move a layer to top, bottom, up, or down
+  enable <layer>      Enable a disabled layer
+  disable <layer>     Disable a layer without deleting it
+
+File provenance / selection:
+  explain <file>      Explain which layer provides a file
+  use <file> <layer>  Select which layer provides a file
+  unuse <file>        Remove an explicit file selection
+
+Git passthrough:
+  -L, --layer <layer> Select a layer for layer-scoped commands
+  git <args...>       Run git inside the selected layer
+
+Examples:
+  {prog} init --output ./buildtree
+  {prog} add ../repo-a repoa
+  {prog} status
+  {prog} move repoa up
+  {prog} compose
+  {prog} compose --clean
+  {prog} explain common/util.c
+  {prog} use common/util.c compb
+  {prog} -L compb git status
+  {prog} -L compb git commit -m "Fix"
+
+See '{prog} help <command>' to read about a specific command.
+"""
+
+
+class LayerArgumentParser(argparse.ArgumentParser):
+    def format_help(self) -> str:
+        return format_layer_help(self.prog)
+
+
+def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
+    parser = LayerArgumentParser(
+        prog=prog,
+        description=HELP_DESCRIPTION,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("-L", "--layer", dest="layer_selector", help="Select a layer for layer-scoped commands")
+    sub = parser.add_subparsers(
+        dest="command",
+        required=True,
+        parser_class=argparse.ArgumentParser,
+    )
 
     init = sub.add_parser("init", help="Create a new layer workspace")
     init.add_argument("--output", default="./buildtree")
@@ -44,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add = sub.add_parser("add", help="Add a source repo as a layer")
     add.add_argument("repo")
-    add.add_argument("--name")
+    add.add_argument("name", nargs="?")
     add.add_argument("--before")
     add.add_argument("--after")
     add.add_argument("--top", action="store_true")
@@ -63,14 +148,29 @@ def build_parser() -> argparse.ArgumentParser:
     enable = sub.add_parser("enable", help="Re-enable a disabled layer")
     enable.add_argument("selector")
 
-    for command, help_text in (
-        ("moveup", "Move a layer one step toward the top"),
-        ("movedown", "Move a layer one step toward the bottom"),
-        ("sendlayertotop", "Move a layer to the top"),
-        ("sendlayertobottom", "Move a layer to the bottom"),
-    ):
-        move = sub.add_parser(command, help=help_text)
-        move.add_argument("selector")
+    move = sub.add_parser(
+        "move",
+        usage="%(prog)s <layer> <top|bottom|up|down|before|after> [target-layer]",
+        description=(
+            "Move one layer in the layer stack.\n\n"
+            "The command is `layer move <layer> <position>`.\n"
+            "For example, `layer move layera up` moves layera one step toward the top."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  layer move layera up\n"
+            "  layer move layera down\n"
+            "  layer move layera top\n"
+            "  layer move layera bottom\n"
+            "  layer move layera before base\n"
+            "  layer move layera after component-b"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="Move a layer in the stack",
+    )
+    move.add_argument("selector", metavar="layer")
+    move.add_argument("position", metavar="position", choices=("top", "bottom", "up", "down", "before", "after"))
+    move.add_argument("target", metavar="target-layer", nargs="?")
 
     status = sub.add_parser("status", help="Show workspace status")
     status.add_argument("--json", action="store_true")
@@ -81,8 +181,23 @@ def build_parser() -> argparse.ArgumentParser:
     tree = sub.add_parser("tree", help="List composed output tree files")
     tree.add_argument("--json", action="store_true")
 
-    compose_cmd = sub.add_parser("compose", help="Rebuild the composed output tree")
+    compose_cmd = sub.add_parser(
+        "compose",
+        description=(
+            "Regenerate the composed output tree from cached layer repositories.\n\n"
+            "By default, LayerGit updates LayerGit-owned files and preserves untracked "
+            "buildtree files such as compiler outputs or IDE artifacts. Use --clean "
+            "to remove the output tree first and regenerate only composed files."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="Rebuild the composed output tree",
+    )
     compose_cmd.add_argument("--json", action="store_true")
+    compose_cmd.add_argument(
+        "--clean",
+        action="store_true",
+        help="remove the output tree before composing, including untracked buildtree files",
+    )
 
     pull = sub.add_parser("pull", help="Pull one or more layers and recompose")
     pull.add_argument("selector", nargs="?", default="all")
@@ -93,30 +208,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-read cached layer repos and recompose without fetching remotes",
     )
 
-    git = sub.add_parser("git", help="Run a Git command in selected layers")
-    git.add_argument("selector")
+    git = sub.add_parser("git", help="Run Git inside the selected layer")
     git.add_argument("git_args", nargs=argparse.REMAINDER)
 
     explain = sub.add_parser("explain", help="Explain file provenance")
     explain.add_argument("path")
     explain.add_argument("--json", action="store_true")
 
-    for command, help_text in (
-        ("sendtotop", "Make one layer's version of a file highest priority"),
-        ("sendtobottom", "Make one layer's version of a file lowest priority"),
-        ("raise", "Move one layer's version of a file up one precedence step"),
-        ("lower", "Move one layer's version of a file down one precedence step"),
-    ):
-        precedence = sub.add_parser(command, help=help_text)
-        precedence.add_argument("layer")
-        precedence.add_argument("path")
-
-    use_file = sub.add_parser(
-        "usefile",
-        help="Select which layer should provide a file, hiding it if that layer does not have it",
-    )
-    use_file.add_argument("layer")
+    use_file = sub.add_parser("use", help="Select which layer should provide a file")
     use_file.add_argument("path")
+    use_file.add_argument("layer")
+
+    unuse = sub.add_parser("unuse", help="Remove an explicit file selection")
+    unuse.add_argument("path")
 
     merge = sub.add_parser("merge", help="Flatten selected layers into a new layer")
     merge.add_argument("selector")
@@ -132,7 +236,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+    prog = program_name()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "help":
+        return cmd_help(prog, argv[1:])
+    invalid = invalid_command(argv)
+    if invalid:
+        print(f"{prog}: '{invalid}' is not a {prog} command. See '{prog} --help'.", file=sys.stderr)
+        return 1
+
+    parser = build_parser(prog)
     args = parser.parse_args(argv)
     root = Path.cwd()
 
@@ -147,8 +260,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_set_enabled(root, args.selector, enabled=False)
         if args.command == "enable":
             return cmd_set_enabled(root, args.selector, enabled=True)
-        if args.command in ("moveup", "movedown", "sendlayertotop", "sendlayertobottom"):
-            return cmd_move_layer(root, args.command, args.selector)
+        if args.command == "move":
+            return cmd_move_layer(root, args)
         if args.command == "status":
             return cmd_status(root, args)
         if args.command == "list":
@@ -163,18 +276,53 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_git(root, args)
         if args.command == "explain":
             return cmd_explain(root, args)
-        if args.command in ("sendtotop", "sendtobottom", "raise", "lower"):
-            return cmd_file_precedence(root, args)
-        if args.command == "usefile":
+        if args.command == "use":
             return cmd_use_file(root, args)
+        if args.command == "unuse":
+            return cmd_unuse_file(root, args)
         if args.command == "merge":
             return cmd_merge(root, args)
         if args.command == "export":
             return cmd_export(root, args)
     except LayerError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(f"{prog}: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_help(prog: str, args: list[str]) -> int:
+    if not args:
+        print(format_layer_help(prog), end="")
+        return 0
+    command = args[0]
+    if command not in PUBLIC_COMMANDS or command == "help":
+        print(f"{prog}: '{command}' is not a {prog} command. See '{prog} --help'.", file=sys.stderr)
+        return 1
+    parser = build_parser(prog)
+    try:
+        parser.parse_args([command, "--help"])
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    return 0
+
+
+def program_name() -> str:
+    return "layergit" if Path(sys.argv[0]).name == "layergit" else "layer"
+
+
+def invalid_command(argv: list[str]) -> str | None:
+    if not argv or argv in (["-h"], ["--help"]):
+        return None
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        if item in ("-L", "--layer"):
+            index += 2
+            continue
+        if item.startswith("-"):
+            return None
+        return None if item in PUBLIC_COMMANDS else item
+    return None
 
 
 def cmd_init(root: Path, args: argparse.Namespace) -> int:
@@ -249,25 +397,33 @@ def cmd_set_enabled(root: Path, selector: str, *, enabled: bool) -> int:
     return 1 if result["conflicts"] else 0
 
 
-def cmd_move_layer(root: Path, command: str, selector: str) -> int:
+def cmd_move_layer(root: Path, args: argparse.Namespace) -> int:
     manifest = load_manifest(root)
     layers = manifest["layers"]
-    indexes = select_layers(layers, selector)
+    indexes = select_layers(layers, args.selector)
     if len(indexes) != 1:
         raise LayerError("layer movement expects exactly one layer")
 
     index = indexes[0]
     layer = layers.pop(index)
-    if command == "moveup":
+    if args.position == "up":
         new_index = min(index + 1, len(layers))
-    elif command == "movedown":
+    elif args.position == "down":
         new_index = max(index - 1, 0)
-    elif command == "sendlayertotop":
+    elif args.position == "top":
         new_index = len(layers)
-    elif command == "sendlayertobottom":
+    elif args.position == "bottom":
         new_index = 0
+    elif args.position == "before":
+        if not args.target:
+            raise LayerError("move before requires a target layer")
+        new_index = select_layers(layers, args.target)[0]
+    elif args.position == "after":
+        if not args.target:
+            raise LayerError("move after requires a target layer")
+        new_index = select_layers(layers, args.target)[-1] + 1
     else:
-        raise LayerError(f"Unknown layer movement command: {command}")
+        raise LayerError(f"Unknown layer movement position: {args.position}")
 
     layers.insert(new_index, layer)
     save_manifest(root, manifest)
@@ -315,7 +471,7 @@ def cmd_tree(root: Path, args: argparse.Namespace) -> int:
 
 def cmd_compose(root: Path, args: argparse.Namespace) -> int:
     manifest = load_manifest(root)
-    result = compose(root, manifest, sync=False)
+    result = compose(root, manifest, sync=False, clean=args.clean)
     if args.json:
         print(json.dumps({k: v for k, v in result.items() if k != "ownership"}, indent=2, sort_keys=True))
     else:
@@ -344,29 +500,17 @@ def cmd_pull(root: Path, args: argparse.Namespace) -> int:
 
 def cmd_git(root: Path, args: argparse.Namespace) -> int:
     manifest = load_manifest(root)
+    if not args.layer_selector:
+        raise LayerError("git requires a layer. Use: layer -L <layer> git <git-args>")
     if not args.git_args:
         raise LayerError("Missing git command")
-    indexes = select_layers(manifest["layers"], args.selector)
-    exit_code = 0
-    for index in indexes:
-        layer = manifest["layers"][index]
-        cache = layer_cache_path(root, layer["name"])
-        result = subprocess.run(
-            ["git", *args.git_args],
-            cwd=cache,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if len(indexes) > 1:
-            print(f"== {layer['name']} ==")
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-        if result.returncode != 0:
-            exit_code = result.returncode
-    return exit_code
+    indexes = select_layers(manifest["layers"], args.layer_selector)
+    if len(indexes) != 1:
+        raise LayerError("git requires exactly one layer")
+    layer = manifest["layers"][indexes[0]]
+    cache = layer_cache_path(root, layer["name"])
+    result = subprocess.run(["git", *args.git_args], cwd=cache)
+    return result.returncode
 
 
 def cmd_explain(root: Path, args: argparse.Namespace) -> int:
@@ -377,50 +521,6 @@ def cmd_explain(root: Path, args: argparse.Namespace) -> int:
     else:
         print(format_explain(args.path, entry))
     return 0 if entry else 1
-
-
-def cmd_file_precedence(root: Path, args: argparse.Namespace) -> int:
-    manifest = load_manifest(root)
-    providers = file_providers(root, manifest, args.path)
-    disabled_providers = set(file_providers(root, manifest, args.path, include_disabled=True)) - set(providers)
-    if not providers:
-        raise LayerError(f"No layer provides `{args.path}`")
-    if args.layer in disabled_providers:
-        raise LayerError(f"Layer `{args.layer}` is disabled and cannot be used for file precedence")
-    if args.layer not in providers:
-        raise LayerError(f"Layer `{args.layer}` does not provide `{args.path}`")
-    if len(providers) == 1:
-        print(f"No precedence change needed: only {providers[0]} provides {args.path}")
-        return 0
-
-    order = current_file_order(manifest, args.path, providers)
-    order.remove(args.layer)
-    if args.command == "sendtotop":
-        order.append(args.layer)
-    elif args.command == "sendtobottom":
-        order.insert(0, args.layer)
-    elif args.command == "raise":
-        index = current_file_order(manifest, args.path, providers).index(args.layer)
-        order = current_file_order(manifest, args.path, providers)
-        if index < len(order) - 1:
-            order[index], order[index + 1] = order[index + 1], order[index]
-    elif args.command == "lower":
-        index = current_file_order(manifest, args.path, providers).index(args.layer)
-        order = current_file_order(manifest, args.path, providers)
-        if index > 0:
-            order[index], order[index - 1] = order[index - 1], order[index]
-
-    manifest.setdefault("file_precedence", {})[args.path] = {"order": order}
-    file_selection = manifest.get("file_selection")
-    if isinstance(file_selection, dict):
-        file_selection.pop(args.path, None)
-        if not file_selection:
-            manifest.pop("file_selection", None)
-    save_manifest(root, manifest)
-    result = compose(root, manifest, sync=False)
-    print(f"Updated file precedence for {args.path}: {' < '.join(order)}")
-    print_compose_result(result)
-    return 1 if result["conflicts"] else 0
 
 
 def cmd_use_file(root: Path, args: argparse.Namespace) -> int:
@@ -446,11 +546,29 @@ def cmd_use_file(root: Path, args: argparse.Namespace) -> int:
     return 1 if result["conflicts"] else 0
 
 
-def current_file_order(manifest: dict, rel_path: str, providers: list[str]) -> list[str]:
-    existing = manifest.get("file_precedence", {}).get(rel_path, {}).get("order") or []
-    valid_existing = [name for name in existing if name in providers]
-    missing = [name for name in providers if name not in valid_existing]
-    return missing + valid_existing
+def cmd_unuse_file(root: Path, args: argparse.Namespace) -> int:
+    manifest = load_manifest(root)
+    changed = False
+    file_selection = manifest.get("file_selection")
+    if isinstance(file_selection, dict) and args.path in file_selection:
+        file_selection.pop(args.path, None)
+        changed = True
+        if not file_selection:
+            manifest.pop("file_selection", None)
+    file_precedence = manifest.get("file_precedence")
+    if isinstance(file_precedence, dict) and args.path in file_precedence:
+        file_precedence.pop(args.path, None)
+        changed = True
+        if not file_precedence:
+            manifest.pop("file_precedence", None)
+    if not changed:
+        print(f"No explicit file selection for {args.path}")
+        return 0
+    save_manifest(root, manifest)
+    result = compose(root, manifest, sync=False)
+    print(f"Removed explicit file selection for {args.path}")
+    print_compose_result(result)
+    return 1 if result["conflicts"] else 0
 
 
 def cmd_merge(root: Path, args: argparse.Namespace) -> int:
@@ -510,11 +628,10 @@ def print_conflict_like_finding(finding: dict) -> None:
         )
     print("")
     print("Options:")
-    print(f"  1. Use layer usefile <layer> {finding['path']} to choose a visible owner")
-    print("  2. Use layer sendtotop/raise/lower for manual file-level precedence")
-    print("  3. Exclude one source file from a layer")
-    print("  4. Rename/remap one file")
-    print("  5. Change duplicate_basename_policy to warn if this build system allows it")
+    print(f"  1. Use layer use {finding['path']} <layer> to choose a visible owner")
+    print("  2. Exclude one source file from a layer")
+    print("  3. Rename/remap one file")
+    print("  4. Change duplicate_basename_policy to warn if this build system allows it")
 
 
 def ensure_gitignore(root: Path, output: str) -> None:

@@ -86,12 +86,10 @@ export class FileNode extends vscode.TreeItem {
     readonly file: TreeFile
   ) {
     super(path.basename(file.path), vscode.TreeItemCollapsibleState.None);
-    this.description = file.hidden ? `hidden by ${file.selectedLayer ?? 'selection'}` : file.visibleLayer;
+    this.description = fileDescription(file);
     this.contextValue = 'layergit.file';
-    this.iconPath = new vscode.ThemeIcon(file.hidden ? 'eye-closed' : 'file');
-    const owner = file.hidden
-      ? `hidden by selected layer: ${file.selectedLayer ?? 'unknown'}`
-      : `visible from: ${file.visibleLayer ?? 'unknown'}`;
+    this.iconPath = new vscode.ThemeIcon(fileIcon(file));
+    const owner = fileTooltipOwner(file);
     this.tooltip = `${file.path}\n${owner}`;
     this.command = {
       command: 'vscode.open',
@@ -103,6 +101,38 @@ export class FileNode extends vscode.TreeItem {
   get uri(): vscode.Uri {
     return vscode.Uri.joinPath(this.workspace, this.output, ...this.file.path.split('/'));
   }
+}
+
+function fileDescription(file: TreeFile): string | undefined {
+  if (file.ownership === 'stale') {
+    return 'stale owned';
+  }
+  if (file.ownership === 'untracked') {
+    return 'untracked';
+  }
+  return file.hidden ? `hidden by ${file.selectedLayer ?? 'selection'}` : file.visibleLayer;
+}
+
+function fileIcon(file: TreeFile): string {
+  if (file.ownership === 'stale') {
+    return 'warning';
+  }
+  if (file.ownership === 'untracked') {
+    return 'question';
+  }
+  return file.hidden ? 'eye-closed' : 'file';
+}
+
+function fileTooltipOwner(file: TreeFile): string {
+  if (file.ownership === 'stale') {
+    return 'previously owned by LayerGit but no longer valid for current layer.yaml';
+  }
+  if (file.ownership === 'untracked') {
+    return 'not owned by any layer';
+  }
+  return file.hidden
+    ? `hidden by selected layer: ${file.selectedLayer ?? 'unknown'}`
+    : `visible from: ${file.visibleLayer ?? 'unknown'}`;
 }
 
 class EmptyNode extends vscode.TreeItem {

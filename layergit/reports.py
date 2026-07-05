@@ -17,8 +17,13 @@ def load_json(path: Path, default: Any) -> Any:
 
 
 def workspace_status(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
-    ownership = load_json(ownership_path(root), {})
-    conflict_data = load_json(conflicts_path(root), {"conflicts": []})
+    raw_ownership = load_json(ownership_path(root), {})
+    ownership = current_ownership(raw_ownership, manifest)
+    buildtree = buildtree_state(root, manifest, ownership, raw_ownership)
+    conflict_data = current_conflict_data(
+        load_json(conflicts_path(root), {"conflicts": [], "warnings": []}),
+        manifest,
+    )
     layers = []
     enabled_indexes = [
         index
@@ -55,9 +60,12 @@ def workspace_status(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 1 for item in ownership.values() if item.get("visible") is not None
             ),
             "masked_files": sum(len(item.get("masked", [])) for item in ownership.values()),
+            "untracked_files": len(buildtree["untracked"]),
+            "stale_owned_files": len(buildtree["stale_owned"]),
             "conflicts": len(conflict_data.get("conflicts", [])),
             "warnings": len(conflict_data.get("warnings", [])),
         },
+        "buildtree": buildtree,
         "conflicts": conflict_data.get("conflicts", []),
         "warnings": conflict_data.get("warnings", []),
         "modified_files": modified_output_files(root, manifest, ownership),
@@ -88,7 +96,9 @@ def layer_list(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def composed_tree(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
-    ownership = load_json(ownership_path(root), {})
+    raw_ownership = load_json(ownership_path(root), {})
+    ownership = current_ownership(raw_ownership, manifest)
+    buildtree = buildtree_state(root, manifest, ownership, raw_ownership)
     layer_indexes = {
         layer["name"]: index
         for index, layer in enumerate(manifest.get("layers", []), start=1)
@@ -101,6 +111,8 @@ def composed_tree(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             {
                 "path": rel_path,
                 "type": "file",
+                "owned": True,
+                "ownership": "composed",
                 "visibleLayer": visible_layer,
                 "visibleLayerIndex": layer_indexes.get(visible_layer),
                 "selectedLayer": entry.get("selected_layer"),
@@ -112,6 +124,35 @@ def composed_tree(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 ],
             }
         )
+    for rel_path in buildtree["stale_owned"]:
+        files.append(
+            {
+                "path": rel_path,
+                "type": "file",
+                "owned": False,
+                "ownership": "stale",
+                "visibleLayer": None,
+                "visibleLayerIndex": None,
+                "selectedLayer": None,
+                "hidden": False,
+                "maskedByThisFile": [],
+            }
+        )
+    for rel_path in buildtree["untracked"]:
+        files.append(
+            {
+                "path": rel_path,
+                "type": "file",
+                "owned": False,
+                "ownership": "untracked",
+                "visibleLayer": None,
+                "visibleLayerIndex": None,
+                "selectedLayer": None,
+                "hidden": False,
+                "maskedByThisFile": [],
+            }
+        )
+    files.sort(key=lambda item: item["path"])
     return {
         "workspace": str(root),
         "output": manifest.get("workspace", {}).get("output", "./buildtree"),
@@ -137,6 +178,100 @@ def modified_output_files(
     return modified
 
 
+def current_ownership(
+    ownership: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    active_layers = active_layer_names(manifest)
+    current: dict[str, Any] = {}
+    for rel_path, entry in ownership.items():
+        normalized = current_ownership_entry(entry, active_layers)
+        if normalized is not None:
+            current[rel_path] = normalized
+    return current
+
+
+def current_ownership_entry(
+    entry: dict[str, Any],
+    active_layers: set[str],
+) -> dict[str, Any] | None:
+    if not active_layers:
+        return None
+    visible = entry.get("visible")
+    masked = [
+        item
+        for item in entry.get("masked", [])
+        if item.get("layer") in active_layers
+    ]
+    if visible:
+        if visible.get("layer") not in active_layers:
+            return None
+        return {**entry, "masked": masked}
+    selected_layer = entry.get("selected_layer")
+    if entry.get("hidden") and selected_layer in active_layers and masked:
+        return {**entry, "masked": masked}
+    return None
+
+
+def current_conflict_data(conflict_data: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    active_layers = active_layer_names(manifest)
+    return {
+        "conflicts": current_findings(conflict_data.get("conflicts", []), active_layers),
+        "warnings": current_findings(conflict_data.get("warnings", []), active_layers),
+    }
+
+
+def current_findings(findings: list[dict[str, Any]], active_layers: set[str]) -> list[dict[str, Any]]:
+    if not active_layers:
+        return []
+    current = []
+    for finding in findings:
+        providers = finding.get("providers", [])
+        if providers and all(provider.get("layer") in active_layers for provider in providers):
+            current.append(finding)
+    return current
+
+
+def active_layer_names(manifest: dict[str, Any]) -> set[str]:
+    return {
+        layer["name"]
+        for layer in manifest.get("layers", [])
+        if layer.get("enabled", True)
+    }
+
+
+def buildtree_state(
+    root: Path,
+    manifest: dict[str, Any],
+    ownership: dict[str, Any],
+    raw_ownership: dict[str, Any],
+) -> dict[str, list[str]]:
+    output_files = set(iter_output_files(output_path(root, manifest)))
+    current_visible = visible_output_paths(ownership)
+    previously_owned = visible_output_paths(raw_ownership)
+    stale_owned = sorted((previously_owned - current_visible) & output_files)
+    untracked = sorted(output_files - previously_owned)
+    return {"untracked": untracked, "stale_owned": stale_owned}
+
+
+def iter_output_files(output: Path) -> list[str]:
+    if not output.exists():
+        return []
+    return [
+        path.relative_to(output).as_posix()
+        for path in output.rglob("*")
+        if path.is_file()
+    ]
+
+
+def visible_output_paths(ownership: dict[str, Any]) -> set[str]:
+    return {
+        rel_path
+        for rel_path, entry in ownership.items()
+        if entry.get("visible") is not None
+    }
+
+
 def format_status(status: dict[str, Any]) -> str:
     lines = ["Layers:"]
     if not status["layers"]:
@@ -154,10 +289,12 @@ def format_status(status: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Composed tree:",
+            "Buildtree:",
             f"  output: {tree['output']}",
-            f"  visible files: {tree['visible_files']}",
+            f"  visible composed files: {tree['visible_files']}",
             f"  masked files: {tree['masked_files']}",
+            f"  untracked buildtree files: {tree.get('untracked_files', 0)}",
+            f"  stale owned files: {tree.get('stale_owned_files', 0)}",
             f"  conflicts: {tree['conflicts']}",
             f"  warnings: {tree.get('warnings', 0)}",
         ]
@@ -180,14 +317,43 @@ def format_status(status: dict[str, Any]) -> str:
         for item in status["modified_files"]:
             lines.append(f"  {item['path']} -> {item['layer']}")
 
+    buildtree = status.get("buildtree", {})
+    if buildtree.get("untracked"):
+        lines.extend(["", "Untracked buildtree files:"])
+        for rel_path in buildtree["untracked"]:
+            lines.append(f"  {rel_path}")
+    if buildtree.get("stale_owned"):
+        lines.extend(["", "Stale owned files:"])
+        for rel_path in buildtree["stale_owned"]:
+            lines.append(f"  {rel_path}")
+
     return "\n".join(lines)
 
 
 def explain_file(root: Path, rel_path: str, manifest: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    ownership = load_json(ownership_path(root), {})
+    raw_ownership = load_json(ownership_path(root), {})
+    ownership = current_ownership(raw_ownership, manifest) if manifest is not None else raw_ownership
     entry = ownership.get(rel_path)
     if entry is not None or manifest is None:
         return entry
+    output = output_path(root, manifest)
+    output_file = output / rel_path
+    if output_file.exists() and output_file.is_file():
+        if rel_path in visible_output_paths(raw_ownership):
+            return {
+                "visible": None,
+                "masked": [],
+                "unowned": True,
+                "stale_owned": True,
+                "reason": "previously owned by LayerGit but no longer valid for current layer.yaml",
+            }
+        return {
+            "visible": None,
+            "masked": [],
+            "unowned": True,
+            "untracked": True,
+            "reason": "file exists in buildtree but is not owned by any layer",
+        }
     all_providers = file_providers(root, manifest, rel_path, include_disabled=True)
     enabled_providers = set(file_providers(root, manifest, rel_path))
     disabled_providers = [
@@ -237,6 +403,20 @@ def add_extension_fields(item: dict[str, Any], layer_indexes: dict[str, int]) ->
 def format_explain(rel_path: str, entry: dict[str, Any] | None) -> str:
     if entry is None:
         return f"No ownership record for {rel_path}"
+    if entry.get("unowned"):
+        lines = [
+            rel_path,
+            "",
+            "Owned by LayerGit:",
+            "  no",
+        ]
+        if entry.get("stale_owned"):
+            lines.extend(["", "State:", "  stale owned file"])
+        elif entry.get("untracked"):
+            lines.extend(["", "State:", "  untracked buildtree file"])
+        if entry.get("reason"):
+            lines.extend(["", "Reason:", f"  {entry['reason']}"])
+        return "\n".join(lines)
     if entry.get("visible") is None:
         selected_layer = entry.get("selected_layer")
         lines = [

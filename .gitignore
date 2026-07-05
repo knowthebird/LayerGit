@@ -62,3 +62,17 @@ vscode-extension/*.vsix
 Thumbs.db
 *.swp
 *.swo
+
+
+# BEGIN LayerGit
+# Generated cache of layer repositories
+/.layer/
+
+# Generated composed output tree
+/buildtree/
+
+# Optional local exports/scratch outputs
+/.layer-exports/
+/merged-project/
+/merged-*/
+# END LayerGit

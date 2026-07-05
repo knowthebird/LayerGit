@@ -29,6 +29,8 @@ export interface LayerGitTree {
 export interface TreeFile {
   path: string;
   type: 'file';
+  owned?: boolean;
+  ownership?: 'composed' | 'stale' | 'untracked';
   visibleLayer?: string;
   visibleLayerIndex?: number;
   selectedLayer?: string;

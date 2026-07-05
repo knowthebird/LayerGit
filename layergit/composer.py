@@ -26,7 +26,13 @@ class Provider:
     overrides: tuple[str, ...]
 
 
-def compose(root: Path, manifest: dict[str, Any], *, sync: bool = True) -> dict[str, Any]:
+def compose(
+    root: Path,
+    manifest: dict[str, Any],
+    *,
+    sync: bool = True,
+    clean: bool = False,
+) -> dict[str, Any]:
     layers = manifest.get("layers", [])
     enabled_layers = [
         (layer_index, layer)
@@ -121,7 +127,8 @@ def compose(root: Path, manifest: dict[str, Any], *, sync: bool = True) -> dict[
     conflicts.extend(policy_conflicts)
     warnings.extend(policy_warnings)
 
-    write_output_tree(output_path(root, manifest), visible)
+    previous_ownership = load_existing_ownership(root)
+    write_output_tree(output_path(root, manifest), visible, previous_ownership, clean=clean)
     write_generated_files(root, manifest, ownership, conflicts, warnings)
     return {
         "visible_files": sum(1 for provider in visible.values() if provider is not None),
@@ -299,16 +306,57 @@ def path_matches(rel_path: str, pattern: str) -> bool:
     return path.match(pattern) or fnmatch.fnmatchcase(rel_path, pattern)
 
 
-def write_output_tree(output: Path, visible: dict[str, Provider | None]) -> None:
-    if output.exists():
+def load_existing_ownership(root: Path) -> dict[str, Any]:
+    path = ownership_path(root)
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text())
+
+
+def write_output_tree(
+    output: Path,
+    visible: dict[str, Provider | None],
+    previous_ownership: dict[str, Any],
+    *,
+    clean: bool,
+) -> None:
+    if clean and output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True, exist_ok=True)
+    previous_owned = previously_owned_output_paths(previous_ownership)
+    visible_paths = {
+        rel_path
+        for rel_path, provider in visible.items()
+        if provider is not None
+    }
+    for rel_path in previous_owned - visible_paths:
+        target = output / rel_path
+        if target.exists() and target.is_file():
+            target.unlink()
+            remove_empty_parents(target.parent, output)
     for rel_path, provider in visible.items():
         if provider is None:
             continue
         target = output / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(provider.abs_path, target)
+
+
+def previously_owned_output_paths(ownership: dict[str, Any]) -> set[str]:
+    return {
+        rel_path
+        for rel_path, entry in ownership.items()
+        if entry.get("visible") is not None
+    }
+
+
+def remove_empty_parents(path: Path, stop: Path) -> None:
+    while path != stop and path.exists():
+        try:
+            path.rmdir()
+        except OSError:
+            return
+        path = path.parent
 
 
 def write_generated_files(
