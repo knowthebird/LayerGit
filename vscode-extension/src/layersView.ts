@@ -27,7 +27,7 @@ export class LayersProvider implements vscode.TreeDataProvider<LayerItem | Empty
       const status = await this.cli.status(workspace);
       return [...status.layers]
         .reverse()
-        .map((layer) => new LayerItem(layer));
+        .map((layer) => new LayerItem(layer, status.write_layer === layer.name));
     } catch (error) {
       return [new EmptyItem(error instanceof Error ? error.message : String(error))];
     }
@@ -35,15 +35,17 @@ export class LayersProvider implements vscode.TreeDataProvider<LayerItem | Empty
 }
 
 export class LayerItem extends vscode.TreeItem {
-  constructor(readonly layer: LayerInfo) {
+  constructor(readonly layer: LayerInfo, readonly writeLayer: boolean) {
     const state = layer.enabled ? 'enabled' : 'disabled';
     const branch = layer.branch ?? '-';
     const top = layer.position === 'top' ? ' top' : '';
+    const write = writeLayer ? ' write' : '';
+    const kind = layer.kind ?? 'git';
     super(`${layer.index} ${layer.name}`, vscode.TreeItemCollapsibleState.None);
-    this.description = `${state} ${branch} ${layer.status}${top}`;
+    this.description = `${kind} ${state} ${branch} ${layer.status}${top}${write}`;
     this.contextValue = layer.enabled ? 'layergit.layer.enabled' : 'layergit.layer.disabled';
     this.iconPath = new vscode.ThemeIcon(layer.enabled ? 'layers-active' : 'circle-slash');
-    this.tooltip = `${layer.name}\n${state}\n${layer.repo ?? ''}`;
+    this.tooltip = `${layer.name}\n${kind}\n${state}${write ? '\nwrite layer' : ''}\n${layer.repo ?? ''}`;
   }
 }
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from .composer import compose
 from .errors import LayerError
 from .exporter import export_workspace
-from .gitops import layer_cache_path, remove_cache, sync_layer
+from .gitops import ensure_local_layer_repo, layer_cache_path, remove_cache, sync_layer
 from .manifest import (
     cache_dir,
     default_manifest,
@@ -31,6 +31,7 @@ from .reports import (
     workspace_status,
 )
 from .selectors import insertion_index, select_layers
+from .worktree import apply_buildtree_changes, buildtree_diff
 
 
 PUBLIC_COMMANDS = {
@@ -44,12 +45,15 @@ PUBLIC_COMMANDS = {
     "status",
     "compose",
     "tree",
+    "diff",
+    "apply",
     "pull",
     "list",
     "git",
     "explain",
     "use",
     "unuse",
+    "write",
     "merge",
     "export",
 }
@@ -70,12 +74,16 @@ Workspace:
   compose             Regenerate the composed output tree
   compose --clean     Remove the output tree and regenerate from scratch
   tree                Show the composed tree
+  diff                Show buildtree changes against owning layers
+  apply               Copy buildtree changes back to layer repos
 
 Layer management:
   init                Create a new LayerGit workspace
   add <repo> [name]   Add a repo as a layer
+  add --local <name>  Add a local Git-backed layer
   remove <layer>      Remove a layer
   move <layer> <pos>  Move a layer to top, bottom, up, or down
+  write <layer>       Set the default write layer
   enable <layer>      Enable a disabled layer
   disable <layer>     Disable a layer without deleting it
 
@@ -90,13 +98,19 @@ Git passthrough:
 
 Examples:
   {prog} init --output ./buildtree
+  {prog} init --output ./buildtree --no-base-layer
   {prog} add ../repo-a repoa
+  {prog} add --local local-edits
   {prog} status
   {prog} move repoa up
+  {prog} write local-edits
   {prog} compose
   {prog} compose --clean
+  {prog} diff common/util.c
+  {prog} apply common/util.c
   {prog} explain common/util.c
   {prog} use common/util.c compb
+  {prog} -L local-edits git status
   {prog} -L compb git status
   {prog} -L compb git commit -m "Fix"
 
@@ -124,12 +138,14 @@ def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="Create a new layer workspace")
     init.add_argument("--output", default="./buildtree")
+    init.add_argument("--no-base-layer", action="store_true")
     init.add_argument("--no-gitignore", action="store_true")
     init.add_argument("--update-gitignore", action="store_true")
 
     add = sub.add_parser("add", help="Add a source repo as a layer")
-    add.add_argument("repo")
+    add.add_argument("repo", nargs="?")
     add.add_argument("name", nargs="?")
+    add.add_argument("--local", action="store_true")
     add.add_argument("--before")
     add.add_argument("--after")
     add.add_argument("--top", action="store_true")
@@ -181,6 +197,35 @@ def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
     tree = sub.add_parser("tree", help="List composed output tree files")
     tree.add_argument("--json", action="store_true")
 
+    diff = sub.add_parser(
+        "diff",
+        description=(
+            "Show changes made in the composed output tree compared with the "
+            "owning layer cache repositories."
+        ),
+        help="Show buildtree changes against owning layers",
+    )
+    diff.add_argument("path", nargs="?")
+    diff.add_argument("--layer", dest="target_layer")
+    diff.add_argument("--new", action="store_true", help="show only new unowned buildtree files")
+    diff.add_argument("--json", action="store_true")
+
+    apply = sub.add_parser(
+        "apply",
+        description=(
+            "Copy changes from the composed output tree back into layer cache "
+            "repositories. Git still handles add, commit, branch, merge, push, and history."
+        ),
+        help="Copy buildtree changes back to layer repos",
+    )
+    apply.add_argument("path", nargs="?")
+    apply.add_argument("--all", action="store_true", help="apply all modified owned files and new unowned files")
+    apply.add_argument("--new", action="store_true", help="apply only new unowned buildtree files")
+    apply.add_argument("--layer", dest="target_layer", help="apply only changes targeting this layer")
+    apply.add_argument("--dry-run", action="store_true", help="show what would be applied without copying files")
+    apply.add_argument("--delete", action="store_true", help="apply deleted buildtree files by deleting layer source files")
+    apply.add_argument("--yes", action="store_true", help="accepted for non-interactive workflows")
+
     compose_cmd = sub.add_parser(
         "compose",
         description=(
@@ -221,6 +266,9 @@ def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
 
     unuse = sub.add_parser("unuse", help="Remove an explicit file selection")
     unuse.add_argument("path")
+
+    write = sub.add_parser("write", help="Set the default write layer")
+    write.add_argument("selector")
 
     merge = sub.add_parser("merge", help="Flatten selected layers into a new layer")
     merge.add_argument("selector")
@@ -268,6 +316,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_list(root, args)
         if args.command == "tree":
             return cmd_tree(root, args)
+        if args.command == "diff":
+            return cmd_diff(root, args)
+        if args.command == "apply":
+            return cmd_apply(root, args)
         if args.command == "compose":
             return cmd_compose(root, args)
         if args.command == "pull":
@@ -280,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_use_file(root, args)
         if args.command == "unuse":
             return cmd_unuse_file(root, args)
+        if args.command == "write":
+            return cmd_write_layer(root, args)
         if args.command == "merge":
             return cmd_merge(root, args)
         if args.command == "export":
@@ -328,10 +382,13 @@ def invalid_command(argv: list[str]) -> str | None:
 def cmd_init(root: Path, args: argparse.Namespace) -> int:
     if manifest_path(root).exists():
         raise LayerError("layer.yaml already exists")
-    save_manifest(root, default_manifest(args.output))
+    manifest = default_manifest(args.output, base_layer=not args.no_base_layer)
+    save_manifest(root, manifest)
     layer_dir(root).mkdir(exist_ok=True)
     cache_dir(root).mkdir(parents=True, exist_ok=True)
-    output_path(root, default_manifest(args.output)).mkdir(parents=True, exist_ok=True)
+    if not args.no_base_layer:
+        ensure_local_layer_repo(root, "workspace-base")
+    output_path(root, manifest).mkdir(parents=True, exist_ok=True)
     if not args.no_gitignore:
         ensure_gitignore(root, args.output)
     print("Initialized layer workspace")
@@ -341,30 +398,52 @@ def cmd_init(root: Path, args: argparse.Namespace) -> int:
 def cmd_add(root: Path, args: argparse.Namespace) -> int:
     manifest = load_manifest(root)
     layers = manifest["layers"]
-    explicit_name = args.name is not None
-    name = args.name or infer_layer_name(args.repo, layers)
+    if args.local:
+        if args.repo is None or args.name is not None:
+            raise LayerError("Use `layer add --local <name>` to create a local layer")
+        explicit_name = True
+        name = args.repo
+        repo = None
+        kind = "local"
+    else:
+        if args.repo is None:
+            raise LayerError("add requires a repo path or --local <name>")
+        explicit_name = args.name is not None
+        name = args.name or infer_layer_name(args.repo, layers)
+        repo = args.repo
+        kind = "git"
     if any(layer.get("name") == name for layer in layers):
         if explicit_name:
             raise LayerError(f"Layer `{name}` already exists")
         name = unique_layer_name(name, layers)
-    layer = {"name": name, "repo": args.repo, "enabled": True}
+    layer = {"name": name, "kind": kind, "enabled": True}
+    if repo:
+        layer["repo"] = repo
     if args.revision:
+        if kind == "local":
+            raise LayerError("--revision is only valid for Git-backed repo layers")
         layer["revision"] = args.revision
 
     index = insertion_index(layers, before=args.before, after=args.after, top=args.top)
     layers.insert(index, layer)
     save_manifest(root, manifest)
 
-    if not args.no_sync:
+    if kind == "local":
+        ensure_local_layer_repo(root, name)
+    elif not args.no_sync:
         sync_layer(root, layer, clone_only=True)
     if not args.no_compose:
         result = compose(root, manifest, sync=False)
         print_compose_result(result)
         print(f"Added layer {index + 1}: {name}")
-        print(f"Source: {args.repo}")
+        print(f"Kind: {kind}")
+        if repo:
+            print(f"Source: {repo}")
         return 1 if result["conflicts"] else 0
     print(f"Added layer {index + 1}: {name}")
-    print(f"Source: {args.repo}")
+    print(f"Kind: {kind}")
+    if repo:
+        print(f"Source: {repo}")
     return 0
 
 
@@ -466,6 +545,44 @@ def cmd_tree(root: Path, args: argparse.Namespace) -> int:
                 else item.get("visibleLayer") or "-"
             )
             print(f"{item['path']} -> {owner}")
+    return 0
+
+
+def cmd_diff(root: Path, args: argparse.Namespace) -> int:
+    manifest = load_manifest(root)
+    data = buildtree_diff(
+        root,
+        manifest,
+        path=args.path,
+        layer=args.target_layer,
+        new_only=args.new,
+    )
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        print(format_buildtree_diff(data))
+    return 0
+
+
+def cmd_apply(root: Path, args: argparse.Namespace) -> int:
+    if not (args.path or args.all or args.new or args.target_layer):
+        raise LayerError("apply requires a path, --all, --new, or --layer <layer>")
+    manifest = load_manifest(root)
+    diff = buildtree_diff(
+        root,
+        manifest,
+        path=args.path,
+        layer=args.target_layer,
+        new_only=args.new,
+    )
+    result = apply_buildtree_changes(
+        root,
+        manifest,
+        diff,
+        include_deleted=args.delete,
+        dry_run=args.dry_run,
+    )
+    print(format_apply_result(result, dry_run=args.dry_run))
     return 0
 
 
@@ -571,6 +688,19 @@ def cmd_unuse_file(root: Path, args: argparse.Namespace) -> int:
     return 1 if result["conflicts"] else 0
 
 
+def cmd_write_layer(root: Path, args: argparse.Namespace) -> int:
+    manifest = load_manifest(root)
+    indexes = select_layers(manifest["layers"], args.selector)
+    if len(indexes) != 1:
+        raise LayerError("write expects exactly one layer")
+    layer = manifest["layers"][indexes[0]]
+    manifest.setdefault("workspace", {})["write_layer"] = layer["name"]
+    save_manifest(root, manifest)
+    suffix = " (local)" if layer.get("kind") == "local" else ""
+    print(f"Write layer: {layer['name']}{suffix}")
+    return 0
+
+
 def cmd_merge(root: Path, args: argparse.Namespace) -> int:
     manifest = load_manifest(root)
     indexes = select_layers(manifest["layers"], args.selector)
@@ -632,6 +762,78 @@ def print_conflict_like_finding(finding: dict) -> None:
     print("  2. Exclude one source file from a layer")
     print("  3. Rename/remap one file")
     print("  4. Change duplicate_basename_policy to warn if this build system allows it")
+
+
+def format_buildtree_diff(data: dict[str, list[dict[str, str | None]]]) -> str:
+    lines: list[str] = []
+    append_diff_section(lines, "Modified:", data.get("modified", []), target_key="layer")
+    append_diff_section(lines, "New:", data.get("new", []), target_key="write_layer", label="write layer")
+    append_diff_section(lines, "Deleted:", data.get("deleted", []), target_key="layer")
+    append_diff_section(lines, "Stale owned:", data.get("stale", []), target_key="layer")
+    if not lines:
+        return "No buildtree changes."
+    return "\n".join(lines)
+
+
+def append_diff_section(
+    lines: list[str],
+    title: str,
+    items: list[dict[str, str | None]],
+    *,
+    target_key: str,
+    label: str | None = None,
+) -> None:
+    if not items:
+        return
+    if lines:
+        lines.append("")
+    lines.append(title)
+    for item in items:
+        target = item.get(target_key) or "unassigned"
+        if label and item.get(target_key):
+            lines.append(f"  {item['path']} -> {label} {target}")
+        else:
+            lines.append(f"  {item['path']} -> {target}")
+
+
+def format_apply_result(data: dict[str, list[dict[str, str | None]]], *, dry_run: bool) -> str:
+    lines: list[str] = []
+    verb = "Would apply" if dry_run else "Applied"
+    append_apply_section(lines, f"{verb} modified:", data.get("modified", []), target_key="layer")
+    append_apply_section(lines, f"{verb} new:", data.get("new", []), target_key="write_layer", label="write layer")
+    append_apply_section(lines, f"{verb} deleted:", data.get("deleted", []), target_key="layer")
+    append_apply_section(
+        lines,
+        "Deleted buildtree file not applied:",
+        data.get("skipped_deleted", []),
+        target_key="layer",
+    )
+    if data.get("skipped_deleted"):
+        lines.extend(["", "Use:", "  layer apply --delete <path>"])
+    if not lines:
+        return "No buildtree changes to apply."
+    return "\n".join(lines)
+
+
+def append_apply_section(
+    lines: list[str],
+    title: str,
+    items: list[dict[str, str | None]],
+    *,
+    target_key: str,
+    label: str | None = None,
+) -> None:
+    if not items:
+        return
+    if lines:
+        lines.append("")
+    lines.append(title)
+    for item in items:
+        target = item.get(target_key) or "unassigned"
+        if label and item.get(target_key):
+            lines.append(f"  {item['path']} -> {label} {target}")
+        else:
+            lines.append(f"  {item['path']} -> {target}")
 
 
 def ensure_gitignore(root: Path, output: str) -> None:

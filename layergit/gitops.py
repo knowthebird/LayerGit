@@ -39,6 +39,9 @@ def layer_cache_path(root: Path, name: str) -> Path:
 
 def sync_layer(root: Path, layer: dict, *, clone_only: bool = False) -> None:
     name = layer["name"]
+    if layer.get("kind") == "local":
+        ensure_local_layer_repo(root, name)
+        return
     repo = layer.get("repo")
     revision = layer.get("revision")
     target = layer_cache_path(root, name)
@@ -69,6 +72,14 @@ def sync_layer(root: Path, layer: dict, *, clone_only: bool = False) -> None:
         raise LayerError(result.stderr.strip())
     if revision:
         run_git(["checkout", revision], target)
+
+
+def ensure_local_layer_repo(root: Path, name: str) -> Path:
+    target = layer_cache_path(root, name)
+    target.mkdir(parents=True, exist_ok=True)
+    if not is_git_repo(target):
+        run_git(["init"], target)
+    return target
 
 
 def remove_cache(root: Path, name: str) -> None:

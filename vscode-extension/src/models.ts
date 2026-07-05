@@ -1,6 +1,7 @@
 export interface LayerGitStatus {
   workspace: string;
   output: string;
+  write_layer?: string;
   layers: LayerInfo[];
   conflicts: unknown[];
   warnings: unknown[];
@@ -9,6 +10,7 @@ export interface LayerGitStatus {
 export interface LayerInfo {
   index: number;
   name: string;
+  kind?: 'git' | 'local';
   repo?: string;
   enabled: boolean;
   position?: 'top' | 'bottom' | null;

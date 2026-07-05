@@ -16,6 +16,8 @@
     "onView:layergit.composedTree",
     "onCommand:layergit.refresh",
     "onCommand:layergit.init",
+    "onCommand:layergit.addLocalLayer",
+    "onCommand:layergit.setWriteLayer",
     "onCommand:layergit.explainCurrentFile"
   ],
   "main": "./out/extension.js",
@@ -67,13 +69,23 @@
       },
       {
         "command": "layergit.addLayer",
-        "title": "LayerGit: Add Layer",
+        "title": "LayerGit: Add Repo Layer",
         "icon": "$(add)"
+      },
+      {
+        "command": "layergit.addLocalLayer",
+        "title": "LayerGit: Add Local Layer",
+        "icon": "$(new-folder)"
       },
       {
         "command": "layergit.removeLayer",
         "title": "LayerGit: Remove Layer",
         "icon": "$(remove)"
+      },
+      {
+        "command": "layergit.setWriteLayer",
+        "title": "LayerGit: Set Write Layer",
+        "icon": "$(edit)"
       },
       {
         "command": "layergit.explainCurrentFile",
@@ -138,6 +150,11 @@
           "group": "navigation"
         },
         {
+          "command": "layergit.addLocalLayer",
+          "when": "view == layergit.layers",
+          "group": "navigation"
+        },
+        {
           "command": "layergit.removeLayer",
           "when": "view == layergit.layers",
           "group": "navigation"
@@ -158,6 +175,11 @@
           "command": "layergit.removeLayer",
           "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
           "group": "inline"
+        },
+        {
+          "command": "layergit.setWriteLayer",
+          "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
+          "group": "write"
         },
         {
           "command": "layergit.moveLayerUp",

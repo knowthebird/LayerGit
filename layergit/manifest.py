@@ -11,11 +11,16 @@ MANIFEST = "layer.yaml"
 LOCKFILE = "layer.lock.yaml"
 
 
-def default_manifest(output: str = "./buildtree") -> dict[str, Any]:
+def default_manifest(output: str = "./buildtree", *, base_layer: bool = True) -> dict[str, Any]:
+    layers = []
+    workspace = {"output": output}
+    if base_layer:
+        workspace["write_layer"] = "workspace-base"
+        layers.append({"name": "workspace-base", "kind": "local", "enabled": True})
     return {
-        "workspace": {"output": output},
+        "workspace": workspace,
         "composition": {"same_path_policy": "top_wins"},
-        "layers": [],
+        "layers": layers,
         "conflicts": {"duplicate_basename_policy": "warn"},
     }
 
@@ -39,6 +44,7 @@ def load_manifest(root: Path) -> dict[str, Any]:
     data.setdefault("file_precedence", {})
     for layer in data["layers"]:
         layer.setdefault("enabled", True)
+        layer.setdefault("kind", "git" if layer.get("repo") else "local")
     return data
 
 

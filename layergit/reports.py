@@ -38,6 +38,7 @@ def workspace_status(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             {
                 "index": index,
                 "name": layer["name"],
+                "kind": layer.get("kind", "git"),
                 "repo": layer.get("repo"),
                 "enabled": layer.get("enabled", True),
                 "position": layer_position(index, enabled_indexes),
@@ -53,6 +54,7 @@ def workspace_status(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "workspace": str(root),
         "output": manifest.get("workspace", {}).get("output", "./buildtree"),
+        "write_layer": manifest.get("workspace", {}).get("write_layer"),
         "layers": layers,
         "composed_tree": {
             "output": manifest.get("workspace", {}).get("output", "./buildtree"),
@@ -281,9 +283,13 @@ def format_status(status: dict[str, Any]) -> str:
         commit = layer.get("commit") or "-"
         suffix = "  top" if layer.get("top") else ""
         enabled = "enabled" if layer.get("enabled") else "disabled"
+        kind = layer.get("kind", "git")
+        write = "  write" if status.get("write_layer") == layer.get("name") else ""
         lines.append(
-            f"  {layer['index']} {layer['name']:<16} {enabled:<8} {layer['status']:<9} {branch} @ {commit}{suffix}"
+            f"  {layer['index']} {layer['name']:<16} {kind:<5} {enabled:<8} {layer['status']:<9} {branch} @ {commit}{suffix}{write}"
         )
+    if status.get("write_layer"):
+        lines.extend(["", f"Write layer: {status['write_layer']}"])
 
     tree = status["composed_tree"]
     lines.extend(
@@ -322,6 +328,15 @@ def format_status(status: dict[str, Any]) -> str:
         lines.extend(["", "Untracked buildtree files:"])
         for rel_path in buildtree["untracked"]:
             lines.append(f"  {rel_path}")
+        if not status.get("write_layer"):
+            lines.extend(
+                [
+                    "",
+                    "Create or select a local layer:",
+                    "  layer add --local local-edits",
+                    "  layer write local-edits",
+                ]
+            )
     if buildtree.get("stale_owned"):
         lines.extend(["", "Stale owned files:"])
         for rel_path in buildtree["stale_owned"]:

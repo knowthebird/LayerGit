@@ -34,8 +34,14 @@ export function registerCommands(
     vscode.commands.registerCommand('layergit.addLayer', async () => {
       await addLayer(cli, refresh);
     }),
+    vscode.commands.registerCommand('layergit.addLocalLayer', async () => {
+      await addLocalLayer(cli, refresh);
+    }),
     vscode.commands.registerCommand('layergit.removeLayer', async (node?: LayerItem) => {
       await removeLayer(cli, node, refresh);
+    }),
+    vscode.commands.registerCommand('layergit.setWriteLayer', async (node?: LayerItem) => {
+      await setWriteLayer(cli, node, refresh);
     }),
     vscode.commands.registerCommand('layergit.openManifest', async () => {
       const workspace = await requireLayerGitWorkspace();
@@ -120,6 +126,22 @@ async function addLayer(cli: LayerGitCli, refresh: () => void): Promise<void> {
   await runCliAction(cli, workspace, args, refresh);
 }
 
+async function addLocalLayer(cli: LayerGitCli, refresh: () => void): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  if (!workspace) {
+    return;
+  }
+  const name = await vscode.window.showInputBox({
+    title: 'LayerGit: Add Local Layer',
+    prompt: 'Layer name for a local Git-backed repo under .layer/cache/',
+    validateInput: (value) => (value.trim() ? undefined : 'Layer name is required.'),
+  });
+  if (!name) {
+    return;
+  }
+  await runCliAction(cli, workspace, ['add', '--local', name.trim()], refresh);
+}
+
 async function removeLayer(
   cli: LayerGitCli,
   node: LayerItem | undefined,
@@ -142,6 +164,22 @@ async function removeLayer(
     return;
   }
   await runCliAction(cli, workspace, ['remove', layerName], refresh);
+}
+
+async function setWriteLayer(
+  cli: LayerGitCli,
+  node: LayerItem | undefined,
+  refresh: () => void
+): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  if (!workspace) {
+    return;
+  }
+  const layerName = node?.layer.name ?? (await pickLayerName(cli, workspace, 'LayerGit: Set Write Layer', true));
+  if (!layerName) {
+    return;
+  }
+  await runCliAction(cli, workspace, ['write', layerName], refresh);
 }
 
 async function setLayerEnabled(
@@ -183,7 +221,7 @@ async function useLayerForFile(
   const picked = await vscode.window.showQuickPick(
     status.layers.map((layer) => ({
       label: layer.name,
-      description: `${layer.enabled ? 'enabled' : 'disabled'}${layer.branch ? ` ${layer.branch}` : ''}`,
+      description: layerDescription(layer, status.write_layer === layer.name),
       detail: layer.repo,
       layer,
     })),
@@ -255,7 +293,7 @@ async function pickLayerName(
   const picked = await vscode.window.showQuickPick(
     status.layers.map((layer) => ({
       label: layer.name,
-      description: `${layer.enabled ? 'enabled' : 'disabled'}${layer.branch ? ` ${layer.branch}` : ''}`,
+      description: layerDescription(layer, status.write_layer === layer.name),
       detail: layer.repo,
       layer,
     })),
@@ -272,6 +310,21 @@ async function pickLayerName(
     return undefined;
   }
   return picked.layer.name;
+}
+
+function layerDescription(
+  layer: { kind?: string; enabled: boolean; branch?: string | null; status?: string },
+  writeLayer = false
+): string {
+  return [
+    layer.kind ?? 'git',
+    layer.enabled ? 'enabled' : 'disabled',
+    layer.branch,
+    layer.status,
+    writeLayer ? 'write' : undefined,
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 function providerLines(

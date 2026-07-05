@@ -80,10 +80,25 @@ class LayerGitCliTest(unittest.TestCase):
         manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
         self.assertEqual(manifest["composition"]["same_path_policy"], "top_wins")
         self.assertEqual(manifest["conflicts"]["duplicate_basename_policy"], "warn")
+        self.assertEqual(manifest["workspace"]["write_layer"], "workspace-base")
+        self.assertEqual(
+            manifest["layers"],
+            [{"name": "workspace-base", "kind": "local", "enabled": True}],
+        )
+        self.assertTrue((self.workspace / ".layer" / "cache" / "workspace-base" / ".git").exists())
+
+    def test_init_no_base_layer_starts_empty(self) -> None:
+        result = self.run_layer("init", "--output", "./buildtree", "--no-base-layer")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.workspace / ".layer" / "cache" / "workspace-base").exists())
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertNotIn("write_layer", manifest["workspace"])
+        self.assertEqual(manifest["layers"], [])
 
     def test_add_first_layer_composes_files(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "int main(void) { return 0; }\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
 
         result = self.run_layer("add", str(product), "product")
 
@@ -98,7 +113,7 @@ class LayerGitCliTest(unittest.TestCase):
 
     def test_add_infers_layer_names_and_suffixes_collisions(self) -> None:
         product = self.make_repo("Repo A", {"src/main.c": "ok\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
 
         first = self.run_layer("add", str(product))
         second = self.run_layer("add", str(product), "--no-compose")
@@ -112,10 +127,78 @@ class LayerGitCliTest(unittest.TestCase):
         manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
         self.assertEqual([layer["name"] for layer in manifest["layers"]], ["repo-a", "repo-a-2"])
 
+    def test_default_workspace_base_is_local_and_git_backed(self) -> None:
+        self.assertEqual(self.run_layer("init").returncode, 0)
+
+        status = self.run_layer("status", "--json")
+        git_status = self.run_layer("-L", "workspace-base", "git", "status", "--short")
+
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(git_status.returncode, 0, git_status.stderr)
+        data = json.loads(status.stdout)
+        self.assertEqual(data["write_layer"], "workspace-base")
+        self.assertEqual(data["layers"][0]["name"], "workspace-base")
+        self.assertEqual(data["layers"][0]["kind"], "local")
+        self.assertTrue(data["layers"][0]["enabled"])
+
+    def test_git_layers_added_after_default_base_are_above_it(self) -> None:
+        product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+
+        result = self.run_layer("add", str(product), "product")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertEqual([layer["name"] for layer in manifest["layers"]], ["workspace-base", "product"])
+        self.assertEqual([layer["kind"] for layer in manifest["layers"]], ["local", "git"])
+
+    def test_add_local_creates_git_backed_local_layer(self) -> None:
+        self.assertEqual(self.run_layer("init").returncode, 0)
+
+        result = self.run_layer("add", "--local", "local-edits")
+        git_status = self.run_layer("-L", "local-edits", "git", "status", "--short")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(git_status.returncode, 0, git_status.stderr)
+        self.assertTrue((self.workspace / ".layer" / "cache" / "local-edits" / ".git").exists())
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertEqual(manifest["layers"][-1]["name"], "local-edits")
+        self.assertEqual(manifest["layers"][-1]["kind"], "local")
+
+    def test_local_layer_participates_in_top_wins_composition(self) -> None:
+        repo = self.make_repo("repo-a", {"common/util.c": "from repo\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo), "repo-a").returncode, 0)
+        self.assertEqual(self.run_layer("add", "--local", "local-edits").returncode, 0)
+        local_file = self.workspace / ".layer" / "cache" / "local-edits" / "common" / "util.c"
+        local_file.parent.mkdir(parents=True)
+        local_file.write_text("from local\n")
+        self.assertEqual(self.run_layer("-L", "local-edits", "git", "add", ".").returncode, 0)
+
+        result = self.run_layer("compose")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "from local\n")
+        explain = json.loads(self.run_layer("explain", "common/util.c", "--json").stdout)
+        self.assertEqual(explain["visible"]["layer"], "local-edits")
+
+    def test_write_layer_command_updates_manifest(self) -> None:
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", "--local", "local-edits").returncode, 0)
+
+        result = self.run_layer("write", "local-edits")
+        missing = self.run_layer("write", "missing-layer")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertEqual(manifest["workspace"]["write_layer"], "local-edits")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("No layer matches selector", missing.stderr)
+
     def test_overlapping_layers_default_to_top_wins_masking(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
 
         result = self.run_layer("add", str(repo_c), "component-c")
@@ -134,7 +217,7 @@ class LayerGitCliTest(unittest.TestCase):
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
         repo_d = self.make_repo("repo-d", {"common/util.c": "from d\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_d), "common", "--no-compose").returncode, 0)
@@ -154,7 +237,7 @@ class LayerGitCliTest(unittest.TestCase):
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n", "src/b.c": "b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n", "src/c.c": "c\n"})
         repo_d = self.make_repo("repo-d", {"common/util.c": "from d\n", "src/d.c": "d\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_d), "common").returncode, 0)
@@ -173,7 +256,7 @@ class LayerGitCliTest(unittest.TestCase):
     def test_unuse_removes_file_selection(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
 
@@ -199,7 +282,7 @@ class LayerGitCliTest(unittest.TestCase):
     def test_use_can_hide_file_when_selected_layer_does_not_provide_it(self) -> None:
         base = self.make_repo("base", {"README.md": "base\n"})
         top = self.make_repo("top", {"common/util.c": "from top\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
         self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
         self.assertTrue((self.workspace / "buildtree" / "common" / "util.c").exists())
@@ -228,7 +311,7 @@ class LayerGitCliTest(unittest.TestCase):
     def test_disable_and_enable_layer_recomposes_without_deleting_cache(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
 
@@ -240,7 +323,7 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertTrue((self.workspace / ".layer" / "cache" / "component-c").exists())
         self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "from b\n")
         status = self.run_layer("status")
-        self.assertIn("component-c      disabled", status.stdout)
+        self.assertIn("component-c      git   disabled", status.stdout)
 
         enabled = self.run_layer("enable", "component-c")
 
@@ -250,7 +333,7 @@ class LayerGitCliTest(unittest.TestCase):
     def test_move_layer_up_and_down_reorders_composition(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
         self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "from c\n")
@@ -271,7 +354,7 @@ class LayerGitCliTest(unittest.TestCase):
 
     def test_composition_uses_tracked_files_only_by_default(self) -> None:
         product = self.make_repo("repo-a", {"tracked.txt": "tracked\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
         cached_untracked = self.workspace / ".layer" / "cache" / "product" / "personal-notes.txt"
         cached_untracked.write_text("local note\n")
@@ -285,7 +368,7 @@ class LayerGitCliTest(unittest.TestCase):
     def test_export_with_provenance(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "int main(void) { return 0; }\n"})
         destination = self.base / "merged-project"
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
 
         result = self.run_layer("export", str(destination), "--with-provenance")
@@ -298,7 +381,7 @@ class LayerGitCliTest(unittest.TestCase):
     def test_export_init_git_creates_standalone_repo_with_commit(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
         destination = self.base / "merged-project"
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
 
         result = self.run_layer("export", str(destination), "--init-git")
@@ -317,7 +400,7 @@ class LayerGitCliTest(unittest.TestCase):
 
     def test_json_status_is_valid(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
 
         result = self.run_layer("status", "--json")
@@ -335,7 +418,7 @@ class LayerGitCliTest(unittest.TestCase):
     def test_status_ignores_stale_ownership_for_removed_layers(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
         self.assertTrue((self.workspace / ".layer" / "ownership.json").exists())
@@ -366,7 +449,7 @@ class LayerGitCliTest(unittest.TestCase):
 
     def test_status_tree_and_explain_report_untracked_buildtree_files(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
         untracked = self.workspace / "buildtree" / "build" / "output.bin"
         untracked.parent.mkdir(parents=True)
@@ -396,7 +479,7 @@ class LayerGitCliTest(unittest.TestCase):
 
     def test_compose_preserves_untracked_buildtree_files_by_default(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
         untracked = self.workspace / "buildtree" / "build" / "output.bin"
         untracked.parent.mkdir(parents=True)
@@ -409,7 +492,7 @@ class LayerGitCliTest(unittest.TestCase):
 
     def test_compose_removes_stale_owned_buildtree_files_by_default(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
         composed_file = self.workspace / "buildtree" / "src" / "main.c"
         self.assertTrue(composed_file.exists())
@@ -429,7 +512,7 @@ class LayerGitCliTest(unittest.TestCase):
 
     def test_disabling_only_provider_removes_previously_owned_output(self) -> None:
         base = self.make_repo("base", {"main.c": "base\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
         output_file = self.workspace / "buildtree" / "main.c"
         self.assertTrue(output_file.exists())
@@ -446,7 +529,7 @@ class LayerGitCliTest(unittest.TestCase):
 
     def test_compose_clean_removes_untracked_buildtree_files(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
         untracked = self.workspace / "buildtree" / "build" / "output.bin"
         untracked.parent.mkdir(parents=True)
@@ -461,7 +544,7 @@ class LayerGitCliTest(unittest.TestCase):
     def test_extension_json_list_tree_and_explain_are_valid(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
         self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
 
@@ -486,7 +569,7 @@ class LayerGitCliTest(unittest.TestCase):
 
     def test_pull_no_fetch_recomposes_cached_layer_without_remote_fetch(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "before\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
         cached_file = self.workspace / ".layer" / "cache" / "product" / "src" / "main.c"
         cached_file.write_text("after\n")
@@ -496,9 +579,98 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.workspace / "buildtree" / "src" / "main.c").read_text(), "after\n")
 
+    def test_diff_reports_modified_owned_buildtree_file(self) -> None:
+        product = self.make_repo("repo-a", {"common/util.c": "before\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "component-b").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("after\n")
+
+        plain = self.run_layer("diff")
+        json_result = self.run_layer("diff", "common/util.c", "--json")
+
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertIn("Modified:", plain.stdout)
+        self.assertIn("common/util.c -> component-b", plain.stdout)
+        self.assertEqual(json_result.returncode, 0, json_result.stderr)
+        data = json.loads(json_result.stdout)
+        self.assertEqual(data["modified"][0]["path"], "common/util.c")
+        self.assertEqual(data["modified"][0]["layer"], "component-b")
+        self.assertEqual(data["new"], [])
+        self.assertEqual(data["deleted"], [])
+
+    def test_apply_owned_buildtree_change_copies_to_layer_cache(self) -> None:
+        product = self.make_repo("repo-a", {"common/util.c": "before\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "component-b").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("after\n")
+
+        result = self.run_layer("apply", "common/util.c")
+        git_status = self.run_layer("-L", "component-b", "git", "status", "--short")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            (self.workspace / ".layer" / "cache" / "component-b" / "common" / "util.c").read_text(),
+            "after\n",
+        )
+        self.assertIn("M common/util.c", git_status.stdout)
+
+    def test_apply_new_unowned_file_uses_write_layer(self) -> None:
+        product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
+        new_file = self.workspace / "buildtree" / "generated" / "config.h"
+        new_file.parent.mkdir(parents=True)
+        new_file.write_text("#define X 1\n")
+
+        diff = self.run_layer("diff", "--new", "--json")
+        result = self.run_layer("apply", "--new")
+        git_status = self.run_layer("-L", "workspace-base", "git", "status", "--short")
+
+        self.assertEqual(diff.returncode, 0, diff.stderr)
+        data = json.loads(diff.stdout)
+        self.assertEqual(data["new"][0]["path"], "generated/config.h")
+        self.assertEqual(data["new"][0]["write_layer"], "workspace-base")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            (self.workspace / ".layer" / "cache" / "workspace-base" / "generated" / "config.h").read_text(),
+            "#define X 1\n",
+        )
+        self.assertIn("?? generated/", git_status.stdout)
+
+    def test_apply_new_file_requires_write_layer(self) -> None:
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        new_file = self.workspace / "buildtree" / "generated" / "config.h"
+        new_file.parent.mkdir(parents=True)
+        new_file.write_text("#define X 1\n")
+
+        result = self.run_layer("apply", "generated/config.h")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("generated/config.h is not owned by any layer and no write layer is configured", result.stderr)
+        self.assertIn("layer add --local local-edits", result.stderr)
+
+    def test_apply_deleted_owned_file_requires_delete_flag(self) -> None:
+        product = self.make_repo("repo-a", {"old/file.c": "old\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "component-b").returncode, 0)
+        (self.workspace / "buildtree" / "old" / "file.c").unlink()
+
+        diff = self.run_layer("diff")
+        skipped = self.run_layer("apply", "old/file.c")
+
+        self.assertEqual(diff.returncode, 0, diff.stderr)
+        self.assertIn("Deleted:", diff.stdout)
+        self.assertIn("old/file.c -> component-b", diff.stdout)
+        self.assertEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
+        self.assertTrue((self.workspace / ".layer" / "cache" / "component-b" / "old" / "file.c").exists())
+        self.assertIn("Deleted buildtree file not applied", skipped.stdout)
+        deleted = self.run_layer("apply", "--delete", "old/file.c")
+        self.assertEqual(deleted.returncode, 0, deleted.stdout + deleted.stderr)
+        self.assertFalse((self.workspace / ".layer" / "cache" / "component-b" / "old" / "file.c").exists())
+
     def test_layer_scoped_git_uses_global_layer_selector(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "before\n"})
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
 
         status = self.run_layer("-L", "product", "git", "status", "--short")
@@ -515,7 +687,7 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertIn("A  new.txt", status_after_add.stdout)
 
     def test_git_without_layer_selector_errors_cleanly(self) -> None:
-        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
 
         result = self.run_layer("git", "status")
 
@@ -540,11 +712,19 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertIn("usage: layer [-h] [-L <layer>] <command> [<args>]", result.stdout)
         self.assertIn("These are common LayerGit commands used in various situations:", result.stdout)
         self.assertIn("Workspace:", result.stdout)
+        self.assertIn("diff", result.stdout)
+        self.assertIn("apply", result.stdout)
         self.assertIn("add <repo> [name]", result.stdout)
+        self.assertIn("add --local <name>", result.stdout)
         self.assertIn("move <layer> <pos>", result.stdout)
+        self.assertIn("write <layer>", result.stdout)
+        self.assertIn("layer init --output ./buildtree --no-base-layer", result.stdout)
+        self.assertIn("layer add --local local-edits", result.stdout)
         self.assertIn("layer move repoa up", result.stdout)
         self.assertIn("compose --clean", result.stdout)
         self.assertIn("layer compose --clean", result.stdout)
+        self.assertIn("layer diff common/util.c", result.stdout)
+        self.assertIn("layer apply common/util.c", result.stdout)
         self.assertIn("use <file> <layer>", result.stdout)
         self.assertIn("-L, --layer <layer>", result.stdout)
         self.assertIn("See 'layer help <command>'", result.stdout)
@@ -602,6 +782,8 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertEqual({view["id"] for view in views}, {"layergit.layers", "layergit.composedTree"})
         self.assertIn("layergit.refresh", commands)
         self.assertIn("layergit.init", commands)
+        self.assertIn("layergit.addLocalLayer", commands)
+        self.assertIn("layergit.setWriteLayer", commands)
         self.assertIn("layergit.explainCurrentFile", commands)
         self.assertIn("layergit.moveLayerUp", commands)
         self.assertIn("layergit.moveLayerDown", commands)

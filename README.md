@@ -1,13 +1,15 @@
 # LayerGit
 
-LayerGit builds one explainable source workspace from ordered Git-backed layers.
-It composes files from multiple Git repositories into a generated shared
-directory structure, records file provenance, supports top-layer-wins masking
-with per-file selections, and provides a VS Code extension as a thin GUI over the
-CLI.
+LayerGit lets multiple Git repositories appear together in one generated workspace.
+
+It is not a replacement for Git. Each layer is still a normal Git repository. LayerGit adds a generated `buildtree/` where files from those repositories are composed together in layer order, so an IDE, build system, or workflow can see one directory structure instead of several separate repos.
+
+When two layers provide the same path, the higher layer wins by default. The lower file is masked, not deleted, and LayerGit records provenance so you can see which layer provided the visible file.
+
+LayerGit is meant for projects where the source needs to stay split across repositories, but the tools around the project expect one shared workspace.
 
 > Status: early prototype. Use on copied/test repositories first. LayerGit writes
-> generated output to `buildtree/` and stores cloned layer repos under
+> generated output to `buildtree/` and stores cloned or local layer repos under
 > `.layer/cache/`.
 
 ## Why LayerGit?
@@ -28,8 +30,8 @@ a selected composition of files from multiple repos.
 Example:
 
 ```text
-Layer 2: component-c provides common/util.c
 Layer 1: component-b provides common/util.c
+Layer 2: component-c provides common/util.c
 ```
 
 Because `component-c` is higher, `buildtree/common/util.c` comes from
@@ -57,17 +59,22 @@ LayerGit has three places you may see files:
    are made and committed.
 3. `buildtree/` is generated output for IDEs and build tools.
 
-Do not treat `buildtree/` as the source of truth.
+`buildtree/` can be edited for IDE or build workflow convenience, but it is not the source of truth. Use `layer apply` to copy changes from `buildtree/` back into the owning layer cache repo before committing with Git.
 
 The prototype writes:
 
-- `layer.yaml`: user-authored manifest
-- `layer.lock.yaml`: generated exact layer commits
-- `.layer/cache/<layer>`: cloned or materialized source layers
-- `.layer/ownership.json`: visible and masked file provenance
-- `.layer/conflicts.json`: conflict and warning report for ambiguous or
+* `layer.yaml`: user-authored manifest
+* `layer.lock.yaml`: generated exact layer commits
+* `.layer/cache/<layer>`: cloned or materialized source layers
+* `.layer/ownership.json`: visible and masked file provenance
+* `.layer/conflicts.json`: conflict and warning report for ambiguous or
   build-risk cases
-- `buildtree/`: composed output tree
+* `buildtree/`: composed output tree
+
+Every layer is Git-backed. Repo layers are cloned from an existing Git repo.
+Local layers are normal layers with no remote. They are initialized as Git repos
+under `.layer/cache/<layer>/` and participate in composition, masking,
+provenance, and Git passthrough just like repo-backed layers.
 
 ## Quick Start
 
@@ -94,10 +101,15 @@ cd my-layergit-workspace
 
 layer init --output ./buildtree
 
-# Add layers from bottom priority to top priority.
+# layer init creates workspace-base as a local Git-backed base layer.
+# Add repo layers above it from lower priority to higher priority.
 layer add ../repo-a product
 layer add ../repo-b component-b
 layer add ../repo-c component-c
+
+# Optional: add a local layer for experiments or local-only edits.
+layer add --local local-edits
+layer write local-edits
 
 layer status
 ```
@@ -115,6 +127,9 @@ If the optional layer name is omitted, LayerGit infers a safe layer name from th
 repo path or URL. Only Git-tracked files from cached layer repos are composed by
 default.
 
+Use `layer init --no-base-layer` only when you want to start with no default
+`workspace-base` local layer.
+
 ## Common Workflows
 
 Explain which layer owns the visible copy of a file:
@@ -131,6 +146,43 @@ $EDITOR .layer/cache/component-b/common/util.c
 layer -L component-b git status
 layer -L component-b git add common/util.c
 layer -L component-b git commit -m "Fix shared utility"
+```
+
+You can also edit generated files in `buildtree/` from an IDE, then ask
+LayerGit to route those edits back to the owning layer cache repo:
+
+```bash
+# after editing buildtree/common/util.c
+layer diff common/util.c
+layer apply common/util.c
+
+layer -L component-b git status
+layer -L component-b git add common/util.c
+layer -L component-b git commit -m "Fix shared utility"
+```
+
+New unowned files in `buildtree/` are routed to the configured write layer:
+
+```bash
+layer diff --new
+layer apply --new
+layer -L workspace-base git status
+```
+
+If no write layer is configured, create or select one explicitly:
+
+```bash
+layer add --local local-edits
+layer write local-edits
+```
+
+Local layers use the same passthrough:
+
+```bash
+layer -L workspace-base git status
+layer -L local-edits git status
+layer -L local-edits git add .
+layer -L local-edits git commit -m "Try local changes"
 ```
 
 Recompose the generated tree from local cached repos:
@@ -195,11 +247,13 @@ layer export ./merged-project --init-git
 
 LayerGit does not replace Git. It scopes Git.
 
-- Use normal Git inside `.layer/cache/<layer>/` if needed.
-- Prefer `layer -L <layer> git <git-command>` from the workspace root.
-- Do not edit or commit from `buildtree/`; it is generated output.
-- Run `layer compose` to regenerate `buildtree/` from the current cached layer
-  repos without fetching remotes. Existing buildtree files are preserved unless
+* Use normal Git inside `.layer/cache/<layer>/` if needed.
+* Prefer `layer -L <layer> git <git-command>` from the workspace root.
+* You may edit `buildtree/` for IDE convenience, but use `layer apply` to copy
+  those edits back into layer cache repos before committing.
+* Do not commit from `buildtree/`; it is generated output.
+* Run `layer compose` to regenerate `buildtree/` from the current cached layer
+  repos without fetching remotes. Files LayerGit never owned are preserved unless
   you run `layer compose --clean`.
 
 ## Examples
@@ -217,23 +271,33 @@ examples/overlap-demo.sh
 
 The VS Code extension provides a LayerGit Activity Bar view with:
 
-- Layers and status
-- Composed Tree
-- file provenance through `layer explain`
-- layer enable/disable actions
-- file selection through `layer use`
+* Layers and status
+* Composed Tree
+* file provenance through `layer explain`
+* repo and local layer add/remove actions
+* layer enable/disable actions
+* write-layer selection through `layer write`
+* file selection through `layer use`
 
 ![LayerGit VS Code extension example](docs/vs-code-example.gif)
 
 The extension lives in `vscode-extension/` and is intentionally a thin GUI over the
 CLI:
 
-- Layers view calls `layer status --json`.
-- Composed Tree view calls `layer tree --json`.
-- File details call `layer explain <file> --json` and write provenance details to
+* Layers view calls `layer status --json`.
+* Composed Tree view calls `layer tree --json`.
+* Add repo layer calls `layer add <repo> [name]`.
+* Add local layer calls `layer add --local <name>`.
+* Set write layer calls `layer write <layer>`.
+* File details call `layer explain <file> --json` and write provenance details to
   the **LayerGit** output channel.
-- File and folder context actions can persist layer selections through
+* File and folder context actions can persist layer selections through
   `layer use`.
+
+In the Layers view, use **Add Repo Layer** for an existing repository path or URL
+and **Add Local Layer** for a new local Git-backed layer under `.layer/cache/`.
+Right-click a layer and choose **Set Write Layer** to make it the target for
+local edits.
 
 ### Run The Extension Locally
 
@@ -298,11 +362,11 @@ documentation, not generated source output.
 
 ## Current Limitations
 
-- Early prototype; test on copied repositories first.
-- `buildtree/` is generated and should not be edited as source.
-- The VS Code extension is currently a development extension, not a packaged
+* Early prototype; test on copied repositories first.
+* `buildtree/` is generated output. You may edit it for IDE/build workflow convenience, but use `layer apply` to copy changes back into layer cache repos before committing.
+* The VS Code extension is currently a development extension, not a packaged
   Marketplace release.
-- Conflict reporting and diagnostics are still evolving.
+* Conflict reporting and diagnostics are still evolving.
 
 ## Feedback
 
