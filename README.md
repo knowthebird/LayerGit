@@ -338,21 +338,22 @@ tools. If one of these fits your workflow cleanly, use it.
 
 LayerGit is aimed at a narrower case: separate Git repositories need to appear
 together as one generated source tree, and overlapping paths need clear
-precedence, masking, provenance, and apply-back behavior. See
-[docs/ALTERNATIVES.md](docs/ALTERNATIVES.md) for a wider feature matrix.
+precedence, masking, provenance, and apply-back behavior. For a more detailed
+comparison, including VCS support and same-path overlap behavior, see
+[docs/ALTERNATIVES.md](docs/ALTERNATIVES.md).
 
-| Tool / approach | What it does well | What LayerGit adds |
-| --- | --- | --- |
-| [multigit](https://github.com/capr/multigit) | Lightweight overlapped Git repositories in one working tree. Repositories act like layers, and the tool stays close to Git. | A separate generated `buildtree/`, visible/masked provenance, explicit per-file provider selection, apply-back from `buildtree/`, and VS Code integration. |
-| [vcsh](https://github.com/RichiH/vcsh) | Maintains several Git repositories in one single directory, commonly for dotfiles/config sets. | Source-tree composition for IDE/build workflows, generated output, masking/provenance, and layer selection. |
-| [Git submodules](https://git-scm.com/book/en/v2/Git-Tools-Submodules) | Keeps another Git repo as a subdirectory with separate history. | Allows multiple layers to contribute to the same logical tree and handles overlapping paths. |
-| [git-subrepo](https://github.com/ingydotnet/git-subrepo) | Vendors an external repo into a subdirectory with pull/push support. | Keeps source repos separate and generates a composed output tree instead of merging into the parent repo. |
-| [repo](https://gerrit.googlesource.com/git-repo/) | Manages many Git repos from manifests. | Adds layer precedence, masking, provenance, and generated source-tree composition. |
-| [west](https://docs.zephyrproject.org/latest/develop/west/manifest.html) | Manages Zephyr-style multi-repo workspaces. | Is not tied to Zephyr and focuses on composing one generated tree from ordered layers. |
-| [vcstool](https://github.com/dirk-thomas/vcstool) | Imports, exports, and operates across multiple VCS repositories. | Adds generated workspace composition and file-level provenance. |
-| [myrepos / mr](https://myrepos.branchable.com/) | Runs commands across many repositories. | Generates one composed workspace for tools that expect a single source tree. |
-| Monorepo | Puts everything in one repository. | Helps when repos must remain separate. |
-| Build-system dependencies | Models dependencies in the build system. | Helps when the IDE/build/source layout is constrained and expects files to exist in one tree. |
+| Tool / approach | What it does well | Same-path overlap handling | What LayerGit adds |
+| --- | --- | --- | --- |
+| [multigit](https://github.com/capr/multigit) | Lightweight overlay of multiple Git repos into one shared working tree. Stays close to Git. | Can expose files tracked by multiple repos, but the shared tree still has one physical file at that path. Users manage the actual content/ownership directly. | A separate generated `buildtree/`, deterministic top-layer-wins composition, visible/masked provenance, `layer explain`, `layer use`, `layer apply`, and LayerGit-specific VS Code views. |
+| [vcsh](https://github.com/RichiH/vcsh) | Maintains several Git repositories in one directory, commonly for dotfiles/config sets. | Intended to avoid clobbering shared files rather than provide source-layer precedence or masking. | Source-tree composition for IDE/build workflows, generated output, masking/provenance, and layer selection. |
+| [Git submodules](https://git-scm.com/book/en/v2/Git-Tools-Submodules) | Keeps another Git repository as a subdirectory with separate history; works with common Git GUI and VS Code Git workflows. | Repos live at path boundaries, so same-path overlays are not the model. | Multiple layers can contribute to the same logical tree, including overlapping paths. |
+| [git-subrepo](https://github.com/ingydotnet/git-subrepo) | Vendors another repo into a subdirectory with pull/push support. | Subdirectory-based; not a same-path layer overlay model. | Keeps source repos separate and generates a composed output tree instead of merging into the parent repo. |
+| [repo](https://gerrit.googlesource.com/git-repo/) | Manages many Git repositories from manifests. | Manages repo checkouts; not focused on overlapping file paths in one generated tree. | Adds generated source-tree composition, layer precedence, masking, and provenance. |
+| [west](https://docs.zephyrproject.org/latest/develop/west/manifest.html) | Manages Zephyr-style multi-repo workspaces. | Manifest workspace model; not focused on same-path source overlays. | Not tied to Zephyr and focused on composing one generated tree from ordered layers. |
+| [vcstool](https://github.com/dirk-thomas/vcstool) | Imports, exports, and operates across multiple VCS repositories. | Workspace management; not same-path layer composition. | Adds generated workspace composition and file-level provenance. |
+| [myrepos / mr](https://myrepos.branchable.com/) | Runs commands across many repositories. | Multi-repo command runner; not same-path layer composition. | Generates one composed workspace for tools that expect a single source tree. |
+| Monorepo | Puts everything in one repository. | Same path conflicts are normal Git conflicts within one repo. | Helps when repositories must remain separate. |
+| Build-system dependencies | Lets CMake, Bazel, package managers, or language tooling model dependencies directly. | Build-defined layout; not a generated source overlay. | Helps when the IDE/build/source layout is constrained and expects files to exist in one tree. |
 
 ## Development
 
