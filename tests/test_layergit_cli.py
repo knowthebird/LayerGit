@@ -314,6 +314,71 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertEqual(data["masked"][0]["layer"], "component-b")
         self.assertEqual(data["reason"], "default top-layer-wins precedence")
 
+    def test_overlaps_reports_visible_and_masked_providers(self) -> None:
+        repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n", "common/other.c": "other b\n"})
+        repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n", "common/other.c": "other c\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
+
+        result = self.run_layer("overlaps")
+        data_result = self.run_layer("overlaps", "--json")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Overlapping paths:", result.stdout)
+        self.assertIn("common/util.c", result.stdout)
+        self.assertIn("visible: component-c", result.stdout)
+        self.assertIn("masked:  component-b", result.stdout)
+        self.assertIn("reason:  top-layer-wins", result.stdout)
+        self.assertEqual(data_result.returncode, 0, data_result.stderr)
+        data = json.loads(data_result.stdout)
+        self.assertFalse(data["stale"])
+        by_path = {item["path"]: item for item in data["overlaps"]}
+        self.assertEqual(set(by_path), {"common/other.c", "common/util.c"})
+        self.assertEqual(by_path["common/util.c"]["visible"]["layer"], "component-c")
+        self.assertEqual(by_path["common/util.c"]["masked"][0]["layer"], "component-b")
+        self.assertEqual(by_path["common/util.c"]["reason"], "top-layer-wins")
+
+        filtered = self.run_layer("overlaps", "common/util.c", "--json")
+        self.assertEqual(filtered.returncode, 0, filtered.stderr)
+        filtered_data = json.loads(filtered.stdout)
+        self.assertEqual([item["path"] for item in filtered_data["overlaps"]], ["common/util.c"])
+
+    def test_overlaps_reports_no_overlaps(self) -> None:
+        repo_b = self.make_repo("repo-b", {"src/b.c": "b\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
+
+        result = self.run_layer("overlaps")
+        path_result = self.run_layer("overlaps", "src/b.c")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "No overlapping paths.")
+        self.assertEqual(path_result.returncode, 0, path_result.stdout + path_result.stderr)
+        self.assertEqual(path_result.stdout.strip(), "No overlapping paths for src/b.c.")
+
+    def test_overlaps_reports_layer_use_and_ignores_disabled_layers(self) -> None:
+        repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
+        repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
+        self.assertEqual(self.run_layer("use", "common/util.c", "component-b").returncode, 0)
+
+        selected = self.run_layer("overlaps", "common/util.c", "--json")
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        selected_data = json.loads(selected.stdout)
+        self.assertEqual(selected_data["overlaps"][0]["visible"]["layer"], "component-b")
+        self.assertEqual(selected_data["overlaps"][0]["masked"][0]["layer"], "component-c")
+        self.assertEqual(selected_data["overlaps"][0]["reason"], "selected by layer use")
+
+        self.assertEqual(self.run_layer("disable", "component-c").returncode, 0)
+        disabled = self.run_layer("overlaps", "common/util.c", "--json")
+
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        disabled_data = json.loads(disabled.stdout)
+        self.assertEqual(disabled_data["overlaps"], [])
+
     def test_top_wins_masks_lower_layers_and_explain_reports_provenance(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
@@ -592,6 +657,38 @@ class LayerGitCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(untracked.exists())
+
+    def test_compose_preserves_unowned_file_that_collides_with_new_provider(self) -> None:
+        product = self.make_repo("repo-a", {"src/main.c": "layer version\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product", "--no-compose").returncode, 0)
+        unowned = self.workspace / "buildtree" / "src" / "main.c"
+        unowned.parent.mkdir(parents=True)
+        unowned.write_text("local unowned\n")
+
+        result = self.run_layer("compose")
+        status = self.run_layer("status", "--json")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("output file exists but is not owned by LayerGit", result.stdout)
+        self.assertEqual(unowned.read_text(), "local unowned\n")
+        status_data = json.loads(status.stdout)
+        self.assertEqual(status_data["composed_tree"]["visible_files"], 0)
+        self.assertEqual(status_data["composed_tree"]["untracked_files"], 1)
+        self.assertEqual(status_data["conflicts"][0]["kind"], "unowned_output_path")
+
+    def test_compose_clean_can_replace_unowned_file_collision(self) -> None:
+        product = self.make_repo("repo-a", {"src/main.c": "layer version\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product", "--no-compose").returncode, 0)
+        unowned = self.workspace / "buildtree" / "src" / "main.c"
+        unowned.parent.mkdir(parents=True)
+        unowned.write_text("local unowned\n")
+
+        result = self.run_layer("compose", "--clean")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(unowned.read_text(), "layer version\n")
 
     def test_compose_removes_stale_owned_buildtree_files_by_default(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "ok\n"})

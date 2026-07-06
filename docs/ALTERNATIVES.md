@@ -7,6 +7,15 @@ LayerGit is aimed at a narrower case: separate Git repositories need to appear
 together as one generated source tree, and overlapping paths need clear
 precedence, masking, provenance, and apply-back behavior.
 
+LayerGit is focused on Git-only source-tree composition into a generated,
+explainable `buildtree/`. Layer repos stay isolated under `.layer/cache/` as
+separate sources of truth. That overhead is useful when users need to know which
+repo provided a visible file, which lower-layer files are masked, and which repo
+should receive an edit made in the generated workspace.
+
+Some alternatives are better fits for lightweight direct overlays, dotfiles,
+manifest-based multi-repo checkout, or multi-VCS repository management.
+
 ## Feature Matrix
 
 | Tool / approach | VCS support | Multi-repo | Same logical tree | Direct overlay | Generated workspace | Same-path overlap handling | Provenance / explainability | Per-file provider selection | Apply-back workflow | GUI / VS Code support | Best fit |
@@ -44,20 +53,24 @@ same path, the highest enabled layer wins by default. Lower copies are masked,
 not deleted, and LayerGit records visible and masked provenance.
 `layer explain <path>` shows which layer provided the visible file, and
 `layer use <path> <layer>` can override the default provider for one path.
+`layer overlaps` lists paths currently provided by more than one enabled layer.
 
 ## Closest Related Tools
 
 `multigit` is probably the closest related project because it overlays multiple
 Git repositories into the same directory and describes those repositories as
-layers. It is lightweight, implemented as a shell script with no dependencies,
-stays close to direct Git workflows, and advertises commands for tracked,
+layers. It is lighter and more direct than LayerGit: a shell script with no
+dependencies, close to normal Git workflows, and commands for tracked,
 untracked, and double-tracked files as well as release/snapshot-related
-workflows.
+workflows. It may be a better fit when the user wants multiple Git repos
+overlaid into one physical working tree and is comfortable managing overlapping
+tracked files directly.
 
 LayerGit is different because it keeps layer repos under `.layer/cache/`, writes
 a separate generated `buildtree/`, records visible/masked provenance, supports
 ordered layer precedence, supports per-file provider selection with `layer use`,
-and routes generated-tree edits back to source repos with `layer apply`.
+reports active overlaps with `layer overlaps`, and routes generated-tree edits
+back to source repos with `layer apply`.
 
 `vcsh` is also close because it maintains several Git repositories in one
 working tree, especially for dotfiles. Its target workflow is different:

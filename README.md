@@ -3,20 +3,23 @@
 [![CI](https://github.com/knowthebird/LayerGit/actions/workflows/ci.yml/badge.svg)](https://github.com/knowthebird/LayerGit/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-LayerGit composes multiple Git repositories into one generated workspace.
+LayerGit composes multiple Git repositories into one generated, explainable
+source workspace.
 
-Each layer is still a normal Git repository. LayerGit clones or creates those
-repos under `.layer/cache/`, then generates a `buildtree/` that tools like IDEs
-and build systems can use as one source tree.
+Each layer is still a normal Git repository. LayerGit keeps layer repos isolated
+under `.layer/cache/<layer>/`, then generates a `buildtree/` that IDEs, build
+systems, and workflows can use as one source tree.
+
+That separation is intentional. The generated tree can show one combined view,
+while each repo remains an isolated source of truth. LayerGit records which
+layer provides each visible file, which lower-layer files are masked, and where
+`buildtree/` edits should be applied.
 
 When two layers provide the same path, the higher layer wins by default. The
-lower file is masked, not deleted. LayerGit records provenance so you can
-explain which layer provided each visible file.
-
-You can override the default choice for specific files, move layers to change
-precedence, and apply `buildtree/` changes back to the appropriate layer repos.
-
-License: Apache-2.0.
+lower file is masked, not deleted. You can override the default choice for
+specific files, move layers to change precedence, enable or disable layers to
+show or hide groups of changes, and apply `buildtree/` changes back to the
+appropriate layer repo.
 
 > Status: early alpha. LayerGit has unit tests and real-Git invariant tests, but
 > it is still new. Use normal Git backups and review `layer status` and
@@ -154,12 +157,15 @@ and export.
 ## Core Concepts
 
 - `layer.yaml` is the workspace recipe.
-- `.layer/cache/<layer>/` contains normal Git repos.
+- `.layer/cache/<layer>/` contains isolated normal Git repos.
 - `buildtree/` is generated output for IDEs and build tools.
 - Higher layers win path conflicts by default.
 - Masked files are not deleted.
+- `layer explain` shows visible and masked provenance.
 - `layer use` selects a different provider for one path.
-- `layer apply` copies edits from `buildtree/` back to the owning layer repo.
+- `layer overlaps` shows paths provided by more than one enabled layer.
+- `layer diff` shows generated-tree edits that can be applied.
+- `layer apply` copies edits from `buildtree/` back to the intended layer repo.
 - Git still handles add, commit, push, branch, and merge.
 
 LayerGit writes supporting metadata:
@@ -175,6 +181,7 @@ LayerGit writes supporting metadata:
 | `layer status`                | Show layer order, state, Git status, and write layer |
 | `layer compose`               | Regenerate `buildtree/` from the current layers      |
 | `layer explain <path>`        | Show which layer provides a file                     |
+| `layer overlaps`              | Show paths provided by more than one enabled layer   |
 | `layer use <path> <layer>`    | Choose a specific layer for one path                 |
 | `layer diff`                  | Show `buildtree/` changes that can be applied        |
 | `layer apply <path>`          | Apply one edited file back to its owning layer       |
@@ -185,6 +192,7 @@ Common examples:
 
 ```bash
 layer explain common/util.c
+layer overlaps
 layer use common/util.c component-b
 layer diff common/util.c
 layer apply common/util.c
@@ -236,9 +244,14 @@ layer enable component-c
 
 ### Clean compose
 
-By default, `layer compose` updates LayerGit-owned files and preserves unknown
-files in `buildtree/`, such as compiler outputs or IDE artifacts. Use explicit
-clean mode only when you want to rebuild the output tree from scratch:
+By default, `layer compose` updates LayerGit-owned files and removes or replaces
+stale files that LayerGit previously generated. It preserves files LayerGit
+never owned, such as compiler outputs or IDE artifacts. If a never-owned file is
+in the way of a generated path, compose reports a conflict instead of
+overwriting it.
+
+Use explicit clean mode only when you want to remove unknown `buildtree/` files
+and rebuild the output tree from scratch:
 
 ```bash
 layer compose --clean
@@ -260,6 +273,7 @@ Several commands support JSON for tools and editor integrations:
 ```bash
 layer status --json
 layer tree --json
+layer overlaps --json
 layer explain common/util.c --json
 ```
 

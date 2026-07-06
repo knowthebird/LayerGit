@@ -26,9 +26,11 @@ from .reports import (
     explain_file,
     explain_json,
     format_explain,
+    format_overlaps,
     format_status,
     format_status_short,
     layer_list,
+    overlap_report,
     workspace_status,
 )
 from .selectors import insertion_index, select_layers
@@ -52,6 +54,7 @@ PUBLIC_COMMANDS = {
     "list",
     "git",
     "explain",
+    "overlaps",
     "use",
     "unuse",
     "write",
@@ -76,6 +79,7 @@ Workspace:
   compose             Regenerate the composed output tree
   compose --clean     Remove the output tree and regenerate from scratch
   tree                Show the composed tree
+  overlaps            Show paths provided by more than one layer
   diff                Show buildtree changes against owning layers
   apply               Copy buildtree changes back to layer repos
 
@@ -109,6 +113,7 @@ Examples:
   {prog} compose
   {prog} compose --clean
   {prog} diff common/util.c
+  {prog} overlaps
   {prog} apply common/util.c
   {prog} explain common/util.c
   {prog} use common/util.c compb
@@ -199,6 +204,10 @@ def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
 
     tree = sub.add_parser("tree", help="List composed output tree files")
     tree.add_argument("--json", action="store_true")
+
+    overlaps = sub.add_parser("overlaps", help="Show paths provided by more than one layer")
+    overlaps.add_argument("path", nargs="?")
+    overlaps.add_argument("--json", action="store_true")
 
     diff = sub.add_parser(
         "diff",
@@ -319,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_list(root, args)
         if args.command == "tree":
             return cmd_tree(root, args)
+        if args.command == "overlaps":
+            return cmd_overlaps(root, args)
         if args.command == "diff":
             return cmd_diff(root, args)
         if args.command == "apply":
@@ -550,6 +561,16 @@ def cmd_tree(root: Path, args: argparse.Namespace) -> int:
                 else item.get("visibleLayer") or "-"
             )
             print(f"{item['path']} -> {owner}")
+    return 0
+
+
+def cmd_overlaps(root: Path, args: argparse.Namespace) -> int:
+    manifest = load_manifest(root)
+    data = overlap_report(root, manifest, rel_path=args.path)
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        print(format_overlaps(data, rel_path=args.path))
     return 0
 
 

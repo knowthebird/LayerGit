@@ -12,17 +12,17 @@ coverage report --format=markdown
 | Name                     |    Stmts |     Miss |    Cover |   Missing |
 |------------------------- | -------: | -------: | -------: | --------: |
 | layergit/\_\_init\_\_.py |        1 |        0 |     100% |           |
-| layergit/cli.py          |      558 |        0 |     100% |           |
-| layergit/composer.py     |      214 |        0 |     100% |           |
+| layergit/cli.py          |      570 |        0 |     100% |           |
+| layergit/composer.py     |      230 |        0 |     100% |           |
 | layergit/errors.py       |        1 |        0 |     100% |           |
 | layergit/exporter.py     |       23 |        0 |     100% |           |
 | layergit/gitops.py       |       87 |        0 |     100% |           |
 | layergit/manifest.py     |       50 |        0 |     100% |           |
 | layergit/merger.py       |       34 |        0 |     100% |           |
-| layergit/reports.py      |      293 |        0 |     100% |           |
+| layergit/reports.py      |      329 |        0 |     100% |           |
 | layergit/selectors.py    |       65 |        0 |     100% |           |
 | layergit/worktree.py     |      119 |        0 |     100% |           |
-| **TOTAL**                | **1445** |    **0** | **100%** |           |
+| **TOTAL**                | **1509** |    **0** | **100%** |           |
 
 ## Coverage pragmas
 

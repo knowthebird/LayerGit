@@ -326,6 +326,10 @@ class LayerGitUnitTest(unittest.TestCase):
         self.assertIn("<none>", no_layers_short)
         self.assertIn("Create or select a local layer", no_layers_short)
         self.assertEqual(reports.status_git_label("modified"), "dirty")
+        self.assertEqual(reports.overlap_reason("custom policy"), "custom policy")
+        self.assertEqual(reports.overlap_reason(None), "top-layer-wins")
+        stale_overlaps = reports.format_overlaps({"stale": True, "overlaps": []})
+        self.assertIn("WARNING: ownership metadata may be stale", stale_overlaps)
 
         self.assertEqual(reports.layer_position(2, [1, 2, 3]), None)
         self.assertEqual(reports.iter_output_files(self.root / "missing"), [])

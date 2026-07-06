@@ -128,6 +128,25 @@ def compose(
     warnings.extend(policy_warnings)
 
     previous_ownership = load_existing_ownership(root)
+    for rel_path, provider, existing_kind in unowned_output_collisions(
+        output_path(root, manifest),
+        visible,
+        previous_ownership,
+        clean=clean,
+    ):
+        visible.pop(rel_path, None)
+        ownership.pop(rel_path, None)
+        conflicts.append(
+            {
+                "kind": "unowned_output_path",
+                "path": rel_path,
+                "providers": [conflict_provider(provider)],
+                "message": (
+                    f"output {existing_kind} exists but is not owned by LayerGit; "
+                    "move it, apply it to a layer, or use compose --clean"
+                ),
+            }
+        )
     write_output_tree(output_path(root, manifest), visible, previous_ownership, clean=clean)
     write_generated_files(root, manifest, ownership, conflicts, warnings)
     return {
@@ -311,6 +330,26 @@ def load_existing_ownership(root: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     return json.loads(path.read_text())
+
+
+def unowned_output_collisions(
+    output: Path,
+    visible: dict[str, Provider | None],
+    previous_ownership: dict[str, Any],
+    *,
+    clean: bool,
+) -> list[tuple[str, Provider, str]]:
+    if clean:
+        return []
+    previous_owned = previously_owned_output_paths(previous_ownership)
+    collisions = []
+    for rel_path, provider in visible.items():
+        if provider is None or rel_path in previous_owned:
+            continue
+        target = output / rel_path
+        if target.exists():
+            collisions.append((rel_path, provider, "directory" if target.is_dir() else "file"))
+    return collisions
 
 
 def write_output_tree(

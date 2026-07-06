@@ -162,6 +162,68 @@ def composed_tree(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def overlap_report(root: Path, manifest: dict[str, Any], rel_path: str | None = None) -> dict[str, Any]:
+    raw_ownership = load_json(ownership_path(root), {})
+    ownership = current_ownership(raw_ownership, manifest)
+    status = workspace_status(root, manifest)
+    overlaps = []
+    for path, entry in sorted(ownership.items()):
+        if rel_path is not None and path != rel_path:
+            continue
+        visible = entry.get("visible")
+        masked = entry.get("masked", [])
+        if not visible or not masked:
+            continue
+        overlaps.append(
+            {
+                "path": path,
+                "visible": visible,
+                "masked": masked,
+                "reason": overlap_reason(entry.get("reason")),
+            }
+        )
+    return {
+        "workspace": str(root),
+        "output": manifest.get("workspace", {}).get("output", "./buildtree"),
+        "stale": status["composed_tree"].get("stale_owned_files", 0) > 0,
+        "overlaps": overlaps,
+    }
+
+
+def overlap_reason(reason: str | None) -> str:
+    if reason == "default top-layer-wins precedence":
+        return "top-layer-wins"
+    if reason == "file-specific layer selection in layer.yaml":
+        return "selected by layer use"
+    return reason or "top-layer-wins"
+
+
+def format_overlaps(data: dict[str, Any], rel_path: str | None = None) -> str:
+    lines: list[str] = []
+    if data.get("stale"):
+        lines.extend(["WARNING: ownership metadata may be stale; run `layer compose`.", ""])
+    overlaps = data.get("overlaps", [])
+    if not overlaps:
+        if rel_path:
+            return "\n".join(lines + [f"No overlapping paths for {rel_path}."])
+        return "\n".join(lines + ["No overlapping paths."])
+    lines.append("Overlapping paths:")
+    for entry in overlaps:
+        visible = entry.get("visible") or {}
+        masked = entry.get("masked", [])
+        masked_layers = ", ".join(item.get("layer", "-") for item in masked)
+        lines.extend(
+            [
+                "",
+                entry["path"],
+                f"  visible: {visible.get('layer', '-')}",
+                f"  masked:  {masked_layers or '-'}",
+                f"  reason:  {entry.get('reason') or '-'}",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def modified_output_files(
     root: Path,
     manifest: dict[str, Any],
