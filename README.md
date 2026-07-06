@@ -3,15 +3,75 @@
 [![CI](https://github.com/knowthebird/LayerGit/actions/workflows/ci.yml/badge.svg)](https://github.com/knowthebird/LayerGit/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-LayerGit lets multiple Git repositories appear together in one generated workspace.
+LayerGit composes multiple Git repositories into one generated workspace.
 
-It is not a replacement for Git. Each layer is still a normal Git repository. LayerGit adds a generated `buildtree/` where files from those repositories are composed together in layer order, so an IDE, build system, or workflow can see one directory structure instead of several separate repos.
+Each layer is still a normal Git repository. LayerGit clones or creates those
+repos under `.layer/cache/`, then generates a `buildtree/` that tools like IDEs
+and build systems can use as one source tree.
 
-When two layers provide the same path, the higher layer wins by default. The lower file is masked, not deleted, and LayerGit records provenance so you can see which layer provided the visible file. You can override the default choice for specific files, move layers to change precedence, and apply buildtree/ changes back to the appropriate layer repos.
+When two layers provide the same path, the higher layer wins by default. The
+lower file is masked, not deleted. LayerGit records provenance so you can
+explain which layer provided each visible file.
 
-LayerGit is meant for projects where the source needs to stay split across repositories, but the tools around the project expect one shared workspace.
+You can override the default choice for specific files, move layers to change
+precedence, and apply `buildtree/` changes back to the appropriate layer repos.
 
-> Status: early alpha. LayerGit has unit tests and invariant tests, but it is still new. Use normal Git backups and review `layer status` and `layer diff` before applying changes to important repositories.
+License: Apache-2.0.
+
+> Status: early alpha. LayerGit has unit tests and real-Git invariant tests, but
+> it is still new. Use normal Git backups and review `layer status` and
+> `layer diff` before applying changes to important repositories.
+
+## Table of Contents
+
+- [What is LayerGit?](#what-is-layergit)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Try the Demo](#try-the-demo)
+- [Core Concepts](#core-concepts)
+- [Common Commands](#common-commands)
+- [Advanced Features](#advanced-features)
+- [VS Code Extension](#vs-code-extension)
+- [Known Limitations](#known-limitations)
+- [Alternatives and Related Projects](#alternatives-and-related-projects)
+- [Development](#development)
+- [Questions, Feedback, and Future POCs](#questions-feedback-and-future-pocs)
+- [License](#license)
+
+## What is LayerGit?
+
+LayerGit is for projects where source files need to remain in separate Git
+repositories, but an IDE, build system, vendor SDK, or workflow expects one
+source tree.
+
+LayerGit is not meant to replace existing Git, build-system, or multi-repo
+tools. If one of those fits cleanly, use it. LayerGit is for cases where
+separate Git repositories need to appear together as one generated source tree,
+especially when layers may overlap and provenance matters.
+
+Layer numbers count from bottom to top. `1` is the bottom/base layer, and the
+highest number is the top/highest-precedence layer. `layer status` displays the
+visual stack from top to bottom.
+
+```text
+Layer 2: component-c  top / higher precedence  provides common/util.c
+Layer 1: component-b  bottom / lower precedence provides common/util.c
+```
+
+Because `component-c` is higher in the stack, `buildtree/common/util.c` comes
+from `component-c`. The `component-b` version is masked and recorded in
+provenance.
+
+## Requirements
+
+- Python `>=3.10`
+- Git
+- `pip` or `pipx`
+- Node.js and npm only if you are developing or packaging the VS Code extension
+- Node.js 20 or newer for VSIX packaging with the current extension packaging
+  toolchain
+- VS Code `^1.92.0` if you are running the extension locally
 
 ## Install
 
@@ -40,92 +100,20 @@ python -m pip install -e '.[dev]'
 layer --help
 ```
 
-The installed package exposes both `layer` and `layergit`; `layer` is the
-intended day-to-day command.
-
-## Try The Demo
-
-The overlap demo is local and network-free after the package is installed. It
-creates temporary Git repositories, composes them into a workspace, shows masked
-file provenance, selects a different layer for one file, applies a buildtree edit
-back to the selected layer, and exports the result.
+The installed package exposes both `layer` and `layergit`. `layer` is the
+intended day-to-day command. The Python module form is useful during local
+development or as a fallback:
 
 ```bash
-examples/overlap-demo.sh
+layer status
+layergit status
+python3 -m layergit.cli status
 ```
-
-## Why LayerGit?
-
-LayerGit is for projects where source files live in several Git repositories, but your IDE or build system needs them to appear together in one directory tree.
-
-The mental model is close to Photoshop-style layers. Repositories are ordered
-from bottom to top. When multiple enabled layers provide the same output path,
-the topmost enabled layer wins by default and lower copies are masked. Those
-masked copies are not deleted; they are recorded as provenance so the generated
-tree is explainable instead of mysterious.
-
-Users can also make explicit per-file exceptions with `layer use`, choosing
-which layer/repo should provide a path even when another layer would normally
-mask it. That means the workspace is not just a blind flattening operation: it is
-a selected composition of files from multiple repos.
-
-Example:
-
-```text
-Layer 1: component-b provides common/util.c
-Layer 2: component-c provides common/util.c
-```
-
-Because `component-c` is higher, `buildtree/common/util.c` comes from
-`component-c`. The `component-b` version is masked and recorded in provenance.
-
-## Why Not Submodules, a Monorepo, or CMake?
-
-LayerGit is not meant to replace normal Git layouts or modern build systems. If a monorepo, package manager, submodule, subtree, or build-system dependency model works cleanly for your project, that is probably the better choice.
-
-LayerGit is for cases where those options do not fit well because the build or development environment needs a specific source tree layout.
-
-* **Submodules and subtrees** keep repositories at path boundaries. They are useful when one repo can live inside another directory, but they do not directly solve cases where several repos need to contribute files into the same logical tree.
-* **Monorepos** are often simpler when teams can combine code history and ownership. LayerGit is for cases where repos need to remain separate but still appear together for a build, IDE, vendor SDK, or legacy workflow.
-* **CMake and other build systems** can model dependencies well when the build can be changed. LayerGit is useful when the build system, IDE, or source layout is constrained and expects files to already exist in one directory structure.
-* **Copying files manually** works until it becomes unclear where a file came from, which copy is authoritative, or why one file replaced another. LayerGit keeps the generated tree explainable by recording visible and masked provenance.
-
-LayerGit is best understood as a source-tree composition tool: it creates one generated, explainable workspace from multiple Git-backed layers.
-
-## Mental Model
-
-LayerGit has three places you may see files:
-
-1. `layer.yaml` is the workspace recipe.
-2. `.layer/cache/<layer>/` contains normal Git repositories where source changes
-   are made and committed.
-3. `buildtree/` is generated output for IDEs and build tools.
-
-`buildtree/` can be edited for IDE or build workflow convenience, but it is not the source of truth. Use `layer apply` to copy changes from `buildtree/` back into the owning layer cache repo before committing with Git.
-
-The prototype writes:
-
-* `layer.yaml`: user-authored manifest
-* `layer.lock.yaml`: generated exact layer commits
-* `.layer/cache/<layer>`: cloned or materialized source layers
-* `.layer/ownership.json`: visible and masked file provenance
-* `.layer/conflicts.json`: conflict and warning report for ambiguous or
-  build-risk cases
-* `buildtree/`: composed output tree
-
-Every layer is Git-backed. Repo layers are cloned from an existing Git repo.
-Local layers are normal layers with no remote. They are initialized as Git repos
-under `.layer/cache/<layer>/` and participate in composition, masking,
-provenance, and Git passthrough just like repo-backed layers.
 
 ## Quick Start
 
-The LayerGit source checkout and the workspace you compose with LayerGit can be
-different directories. Install the CLI from this repo, then run `layer init`
-inside the workspace you want LayerGit to manage.
-
-Use one directory as the LayerGit workspace, then add existing Git repositories as
-layers. Source repositories can live anywhere; LayerGit clones them into
+Use one directory as the LayerGit workspace, then add existing Git repositories
+as layers. Source repositories can live anywhere; LayerGit clones them into
 `.layer/cache/<layer-name>/` and generates `buildtree/`.
 
 ```bash
@@ -134,64 +122,73 @@ cd my-layergit-workspace
 
 layer init --output ./buildtree
 
-# layer init creates workspace-base as a local Git-backed base layer.
-# Add repo layers above it from lower priority to higher priority.
 layer add ../repo-a product
 layer add ../repo-b component-b
 layer add ../repo-c component-c
 
-# Optional: add a local layer for experiments or local-only edits.
-layer add --local local-edits
-layer write local-edits
-
 layer status
+layer compose
+layer explain common/util.c
 ```
 
-`layer` is the intended installed command. The package also exposes `layergit`,
-and the Python module form is useful during local development or as a fallback:
-
-```bash
-layer status
-layergit status
-python3 -m layergit.cli status
-```
-
-If the optional layer name is omitted, LayerGit infers a safe layer name from the
-repo path or URL. Only Git-tracked files from cached layer repos are composed by
-default.
+`layer init` creates `workspace-base` as a local Git-backed base layer by
+default. Repo layers are added above it. `buildtree/` is generated output, and
+higher layers win overlapping paths unless you choose a different provider with
+`layer use`.
 
 Use `layer init --no-base-layer` only when you want to start with no default
 `workspace-base` local layer.
 
-## Common Workflows
+## Try the Demo
 
-Explain which layer owns the visible copy of a file:
+The overlap demo is local and network-free after the package is installed:
+
+```bash
+examples/overlap-demo.sh
+```
+
+It demonstrates temporary local Git repos, overlapping files, top-layer-wins
+behavior, provenance, `layer use`, applying a `buildtree/` edit back to a layer,
+and export.
+
+## Core Concepts
+
+- `layer.yaml` is the workspace recipe.
+- `.layer/cache/<layer>/` contains normal Git repos.
+- `buildtree/` is generated output for IDEs and build tools.
+- Higher layers win path conflicts by default.
+- Masked files are not deleted.
+- `layer use` selects a different provider for one path.
+- `layer apply` copies edits from `buildtree/` back to the owning layer repo.
+- Git still handles add, commit, push, branch, and merge.
+
+LayerGit writes supporting metadata:
+
+- `layer.lock.yaml`: generated exact layer commits
+- `.layer/ownership.json`: visible and masked file provenance
+- `.layer/conflicts.json`: conflict and warning report
+
+## Common Commands
+
+| Command                       | Purpose                                              |
+| ----------------------------- | ---------------------------------------------------- |
+| `layer status`                | Show layer order, state, Git status, and write layer |
+| `layer compose`               | Regenerate `buildtree/` from the current layers      |
+| `layer explain <path>`        | Show which layer provides a file                     |
+| `layer use <path> <layer>`    | Choose a specific layer for one path                 |
+| `layer diff`                  | Show `buildtree/` changes that can be applied        |
+| `layer apply <path>`          | Apply one edited file back to its owning layer       |
+| `layer apply --new`           | Apply new unowned files to the write layer           |
+| `layer -L <layer> git status` | Run Git inside a layer cache repo                    |
+
+Common examples:
 
 ```bash
 layer explain common/util.c
-```
-
-Edit and commit inside the owning cached repo through the layer-aware Git
-passthrough:
-
-```bash
-$EDITOR .layer/cache/component-b/common/util.c
-layer -L component-b git status
-layer -L component-b git add common/util.c
-layer -L component-b git commit -m "Fix shared utility"
-```
-
-You can also edit generated files in `buildtree/` from an IDE, then ask
-LayerGit to route those edits back to the owning layer cache repo:
-
-```bash
-# after editing buildtree/common/util.c
+layer use common/util.c component-b
 layer diff common/util.c
 layer apply common/util.c
-
 layer -L component-b git status
-layer -L component-b git add common/util.c
-layer -L component-b git commit -m "Fix shared utility"
 ```
 
 New unowned files in `buildtree/` are routed to the configured write layer:
@@ -202,54 +199,20 @@ layer apply --new
 layer -L workspace-base git status
 ```
 
-If no write layer is configured, create or select one explicitly:
+## Advanced Features
+
+### Local layers and write layer
+
+Local layers are Git-backed repos created under `.layer/cache/`. They are useful
+for experiments, local-only changes, or new files.
 
 ```bash
 layer add --local local-edits
 layer write local-edits
-```
-
-Local layers use the same passthrough:
-
-```bash
-layer -L workspace-base git status
 layer -L local-edits git status
-layer -L local-edits git add .
-layer -L local-edits git commit -m "Try local changes"
 ```
 
-Recompose the generated tree from local cached repos:
-
-```bash
-layer compose
-layer status
-```
-
-By default, `layer compose` writes current composed files, removes files LayerGit
-previously owned but no longer composes, and preserves unknown files in
-`buildtree/`, such as compiler outputs or IDE artifacts. Use the explicit clean
-mode only when you want to rebuild the output tree from scratch:
-
-```bash
-layer compose --clean
-```
-
-Fetch or pull layers from their remotes and then recompose:
-
-```bash
-layer pull
-layer pull component-b
-```
-
-Select which layer provides one overlapping file:
-
-```bash
-layer use common/util.c component-b
-layer explain common/util.c
-```
-
-This pins `common/util.c` to `component-b` even if a higher layer also provides
-that path. The rest of the tree still follows normal layer order.
+### Moving layers
 
 Move a layer in the stack with `layer move <layer> <position>`:
 
@@ -260,6 +223,8 @@ layer move component-b top
 layer move component-b bottom
 ```
 
+### Enabling and disabling layers
+
 Temporarily hide or re-enable a layer without deleting its manifest entry or
 cached repo:
 
@@ -269,6 +234,18 @@ layer status
 layer enable component-c
 ```
 
+### Clean compose
+
+By default, `layer compose` updates LayerGit-owned files and preserves unknown
+files in `buildtree/`, such as compiler outputs or IDE artifacts. Use explicit
+clean mode only when you want to rebuild the output tree from scratch:
+
+```bash
+layer compose --clean
+```
+
+### Export
+
 Export the current composed tree as a standalone directory or Git repo:
 
 ```bash
@@ -276,117 +253,116 @@ layer export ./merged-project --with-provenance
 layer export ./merged-project --init-git
 ```
 
-## Standard Git Behavior
+### JSON output
 
-LayerGit does not replace Git. It scopes Git.
-
-* Use normal Git inside `.layer/cache/<layer>/` if needed.
-* Prefer `layer -L <layer> git <git-command>` from the workspace root.
-* You may edit `buildtree/` for IDE convenience, but use `layer apply` to copy
-  those edits back into layer cache repos before committing.
-* Do not commit from `buildtree/`; it is generated output.
-* Run `layer compose` to regenerate `buildtree/` from the current cached layer
-  repos without fetching remotes. Files LayerGit never owned are preserved unless
-  you run `layer compose --clean`.
-
-## Examples
-
-See [examples/](examples/) for local, network-free demos. The overlap demo builds
-two temporary Git repositories with the same `common/util.c`, composes them, shows
-top-layer-wins provenance, switches the visible file with `layer use`, and
-exports the result.
+Several commands support JSON for tools and editor integrations:
 
 ```bash
-examples/overlap-demo.sh
+layer status --json
+layer tree --json
+layer explain common/util.c --json
 ```
+
+### Git passthrough
+
+Use normal Git inside `.layer/cache/<layer>/` if needed, or run scoped Git
+commands from the workspace root:
+
+```bash
+layer -L component-b git status
+layer -L component-b git add common/util.c
+layer -L component-b git commit -m "Fix shared utility"
+```
+
+Do not commit from `buildtree/`; it is generated output. Use `layer apply` first.
 
 ## VS Code Extension
 
-The VS Code extension provides a LayerGit Activity Bar view with:
+The VS Code extension provides a thin GUI over the LayerGit CLI:
 
-* Layers and status
-* Composed Tree
-* file provenance through `layer explain`
-* repo and local layer add/remove actions
-* layer enable/disable actions
-* write-layer selection through `layer write`
-* file selection through `layer use`
+- Layers and status
+- Composed Tree
+- `layer explain` file provenance
+- repo and local layer add/remove actions
+- layer enable/disable actions
+- write-layer selection through `layer write`
+- file and folder provider selection through `layer use`
 
 ![LayerGit VS Code extension example](docs/vs-code-example.gif)
 
-The extension lives in `vscode-extension/` and is intentionally a thin GUI over the
-CLI:
-
-* Layers view calls `layer status --json`.
-* Composed Tree view calls `layer tree --json`.
-* Add repo layer calls `layer add <repo> [name]`.
-* Add local layer calls `layer add --local <name>`.
-* Set write layer calls `layer write <layer>`.
-* File details call `layer explain <file> --json` and write provenance details to
-  the **LayerGit** output channel.
-* File and folder context actions can persist layer selections through
-  `layer use`.
-
-In the Layers view, use **Add Repo Layer** for an existing repository path or URL
-and **Add Local Layer** for a new local Git-backed layer under `.layer/cache/`.
-Right-click a layer and choose **Set Write Layer** to make it the target for
-local edits.
-
-### Run The Extension Locally
-
-First install the Python CLI from the repo root:
+Run it locally:
 
 ```bash
-# from the LayerGit repo root, not vscode-extension/
+# from the LayerGit repo root
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
-layer --help
-```
 
-Then install and compile the extension dependencies:
-
-```bash
-# still from the LayerGit repo root
 cd vscode-extension
 npm ci
 npm run compile
 cd ..
 ```
 
-Open the repo root in VS Code, then choose **Run > Start Debugging**. VS Code
-should use the checked-in **Run LayerGit Extension** launch configuration.
+Open the repo root in VS Code, then choose **Run > Start Debugging**. The
+checked-in debug workspace at `.vscode/debug-target.code-workspace` lets the
+Extension Development Host use this repo as its test workspace.
 
-The checked-in debug workspace at
-`.vscode/debug-target.code-workspace` gives the Extension Development Host a
-distinct workspace identity while pointing at the repo root.
-
-The extension defaults to `layer`. During local development, if the workspace has
-`.venv/bin/python`, or the LayerGit source checkout has `.venv/bin/python`, the
-extension automatically falls back to:
+Package a local `.vsix`:
 
 ```bash
-.venv/bin/python -m layergit.cli
+cd vscode-extension
+npm ci
+npm run compile
+npm run package
+code --install-extension layergit-vscode-0.0.1.vsix
 ```
 
-After changing TypeScript, rerun `npm run compile` or leave `npm run watch`
-running, then reload the Extension Development Host window. Changes to
-`vscode-extension/package.json` require stopping and starting the debug session.
+The packaged extension still shells out to the Python CLI, so install `layer`
+first. More extension development notes live in
+[vscode-extension/README.md](vscode-extension/README.md).
 
-Packaging a `.vsix` requires Node.js 20 or newer because the VS Code packaging
-toolchain uses Node 20-only dependencies. If your distro `npm` installed Node
-18, `npm ci` and `npm run compile` can still work for extension development, but
-run `npm run package` with Node 20.
+## Known Limitations
+
+- Early alpha; test important workflows on copied repositories before relying on
+  it.
+- `buildtree/` is generated output. Use `layer apply` before committing changes.
+- The VS Code extension is still local/development-oriented, not a Marketplace
+  release.
+- Conflict diagnostics are still evolving.
+
+## Alternatives and Related Projects
+
+LayerGit is not meant to replace existing Git, build-system, or multi-repo
+tools. If one of these fits your workflow cleanly, use it.
+
+LayerGit is aimed at a narrower case: separate Git repositories need to appear
+together as one generated source tree, and overlapping paths need clear
+precedence, masking, provenance, and apply-back behavior. See
+[docs/ALTERNATIVES.md](docs/ALTERNATIVES.md) for a wider feature matrix.
+
+| Tool / approach | What it does well | What LayerGit adds |
+| --- | --- | --- |
+| [multigit](https://github.com/capr/multigit) | Lightweight overlapped Git repositories in one working tree. Repositories act like layers, and the tool stays close to Git. | A separate generated `buildtree/`, visible/masked provenance, explicit per-file provider selection, apply-back from `buildtree/`, and VS Code integration. |
+| [vcsh](https://github.com/RichiH/vcsh) | Maintains several Git repositories in one single directory, commonly for dotfiles/config sets. | Source-tree composition for IDE/build workflows, generated output, masking/provenance, and layer selection. |
+| [Git submodules](https://git-scm.com/book/en/v2/Git-Tools-Submodules) | Keeps another Git repo as a subdirectory with separate history. | Allows multiple layers to contribute to the same logical tree and handles overlapping paths. |
+| [git-subrepo](https://github.com/ingydotnet/git-subrepo) | Vendors an external repo into a subdirectory with pull/push support. | Keeps source repos separate and generates a composed output tree instead of merging into the parent repo. |
+| [repo](https://gerrit.googlesource.com/git-repo/) | Manages many Git repos from manifests. | Adds layer precedence, masking, provenance, and generated source-tree composition. |
+| [west](https://docs.zephyrproject.org/latest/develop/west/manifest.html) | Manages Zephyr-style multi-repo workspaces. | Is not tied to Zephyr and focuses on composing one generated tree from ordered layers. |
+| [vcstool](https://github.com/dirk-thomas/vcstool) | Imports, exports, and operates across multiple VCS repositories. | Adds generated workspace composition and file-level provenance. |
+| [myrepos / mr](https://myrepos.branchable.com/) | Runs commands across many repositories. | Generates one composed workspace for tools that expect a single source tree. |
+| Monorepo | Puts everything in one repository. | Helps when repos must remain separate. |
+| Build-system dependencies | Models dependencies in the build system. | Helps when the IDE/build/source layout is constrained and expects files to exist in one tree. |
 
 ## Development
 
-Run Python tests without external test dependencies:
+Run Python tests:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python -m unittest
 ```
 
-Run Python coverage for the CLI and child LayerGit processes:
+Run coverage for the CLI and child LayerGit processes:
 
 ```bash
 python -m pip install -e '.[dev]'
@@ -397,11 +373,6 @@ coverage report
 coverage report --format=markdown > tests/coverage-summary.md
 ```
 
-`LAYERGIT_TEST_COVERAGE=1` tells the test harness to run each spawned
-`python -m layergit.cli` subprocess under `coverage run --parallel-mode`, so the
-reported numbers include the actual CLI code paths. The checked-in snapshot is
-saved at `tests/coverage-summary.md`.
-
 Compile the VS Code extension:
 
 ```bash
@@ -410,37 +381,19 @@ npm ci
 npm run compile
 ```
 
-Package a local VSIX:
+CI runs Python tests, coverage, the overlap demo, extension compile, and VSIX
+packaging.
 
-```bash
-cd vscode-extension
-# requires Node.js 20 or newer
-npm ci
-npm run compile
-npm run package
-code --install-extension layergit-vscode-0.0.1.vsix
-```
+## Questions, Feedback, and Future POCs
 
-The packaged extension still shells out to the Python CLI, so install `layer`
-first with `pipx`, `pip`, or the local development venv shown above.
+LayerGit is an early alpha. Feedback is especially useful around:
 
-`layer init` writes a workspace `.gitignore` for `.layer/` and the configured
-output tree so standard Git from the workspace root tracks configuration and
-documentation, not generated source output.
+- workflows where multiple repos need to appear as one source tree
+- embedded, firmware, vendor SDK, legacy IDE, or generated workspace use cases
+- cases where submodules, monorepos, or build-system dependencies do not fit
+- examples that would make good future demos or proofs of concept
 
-## Current Limitations
-
-* Early prototype; test on copied repositories first.
-* `buildtree/` is generated output. You may edit it for IDE/build workflow convenience, but use `layer apply` to copy changes back into layer cache repos before committing.
-* The VS Code extension is currently a development extension, not a packaged
-  Marketplace release.
-* Conflict reporting and diagnostics are still evolving.
-
-## Feedback
-
-LayerGit is an early prototype. I am sharing it to see whether this layered workspace model is useful to others.
-
-Feedback, issues, real-world examples, and suggestions are welcome and will help guide future development.
+Open issues for bugs, workflow feedback, feature requests, or demo ideas.
 
 ## License
 

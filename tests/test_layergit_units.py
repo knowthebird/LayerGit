@@ -312,12 +312,20 @@ class LayerGitUnitTest(unittest.TestCase):
             "buildtree": {"untracked": ["new.c"], "stale_owned": ["stale.c"]},
         }
         formatted = reports.format_status(status)
-        self.assertIn("Write layer: local", formatted)
+        self.assertIn("LayerGit status", formatted)
+        self.assertIn("Write:     local", formatted)
+        self.assertIn("write-layer, top, bottom", formatted)
         self.assertIn("stale.c", formatted)
+        short = reports.format_status_short(status)
+        self.assertIn("Write layer: local", short)
         no_layers = {**status, "layers": [], "write_layer": None}
         no_layers_text = reports.format_status(no_layers)
         self.assertIn("<none>", no_layers_text)
         self.assertIn("Create or select a local layer", no_layers_text)
+        no_layers_short = reports.format_status_short(no_layers)
+        self.assertIn("<none>", no_layers_short)
+        self.assertIn("Create or select a local layer", no_layers_short)
+        self.assertEqual(reports.status_git_label("modified"), "dirty")
 
         self.assertEqual(reports.layer_position(2, [1, 2, 3]), None)
         self.assertEqual(reports.iter_output_files(self.root / "missing"), [])

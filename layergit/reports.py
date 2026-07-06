@@ -274,7 +274,7 @@ def visible_output_paths(ownership: dict[str, Any]) -> set[str]:
     }
 
 
-def format_status(status: dict[str, Any]) -> str:
+def format_status_short(status: dict[str, Any]) -> str:
     lines = ["Layers:"]
     if not status["layers"]:
         lines.append("  <none>")
@@ -343,6 +343,124 @@ def format_status(status: dict[str, Any]) -> str:
             lines.append(f"  {rel_path}")
 
     return "\n".join(lines)
+
+
+def format_status(status: dict[str, Any]) -> str:
+    tree = status["composed_tree"]
+    lines = [
+        "LayerGit status",
+        "",
+        f"Workspace: {status.get('workspace', '-')}",
+        f"Output:    {tree.get('output') or status.get('output') or './buildtree'}",
+        "Order:     top -> bottom; higher layers win path conflicts",
+        f"Write:     {status.get('write_layer') or '<none>'}",
+        "",
+        "Layers:",
+    ]
+    if not status["layers"]:
+        lines.append("  <none>")
+    else:
+        layers = list(reversed(status["layers"]))
+        headers = ["ORDER", "NAME", "TYPE", "STATE", "GIT", "BRANCH", "COMMIT", "FLAGS"]
+        enabled_count = sum(1 for layer in status["layers"] if layer.get("enabled"))
+        rows = [status_layer_row(layer, status.get("write_layer"), enabled_count) for layer in layers]
+        widths = [
+            max(len(headers[index]), *(len(row[index]) for row in rows))
+            for index in range(len(headers))
+        ]
+        lines.append("  " + format_status_row(headers, widths))
+        for row in rows:
+            lines.append("  " + format_status_row(row, widths))
+
+    enabled = sum(1 for layer in status["layers"] if layer.get("enabled"))
+    disabled = len(status["layers"]) - enabled
+    dirty = sum(1 for layer in status["layers"] if layer.get("dirty") or layer.get("status") not in ("clean", "missing"))
+    lines.extend(
+        [
+            "",
+            "Summary:",
+            f"  {enabled} layers enabled",
+            f"  {disabled} disabled",
+            f"  {dirty} dirty",
+            f"  {tree['conflicts']} conflicts",
+            f"  {tree.get('warnings', 0)} warnings",
+            f"  {tree['visible_files']} visible composed files",
+            f"  {tree['masked_files']} masked files",
+            f"  {tree.get('untracked_files', 0)} untracked buildtree files",
+            f"  {tree.get('stale_owned_files', 0)} stale owned files",
+        ]
+    )
+
+    if status["conflicts"]:
+        lines.extend(["", "Conflicts:"])
+        for conflict in status["conflicts"]:
+            providers = " and ".join(provider["layer"] for provider in conflict["providers"])
+            lines.append(f"  {conflict['path']} exists in {providers}")
+
+    if status.get("warnings"):
+        lines.extend(["", "Warnings:"])
+        for warning in status["warnings"]:
+            providers = " and ".join(provider["layer"] for provider in warning["providers"])
+            lines.append(f"  {warning['path']} appears in {providers}")
+
+    if status["modified_files"]:
+        lines.extend(["", "Modified files:"])
+        for item in status["modified_files"]:
+            lines.append(f"  {item['path']} -> {item['layer']}")
+
+    buildtree = status.get("buildtree", {})
+    if buildtree.get("untracked"):
+        lines.extend(["", "Untracked buildtree files:"])
+        for rel_path in buildtree["untracked"]:
+            lines.append(f"  {rel_path}")
+        if not status.get("write_layer"):
+            lines.extend(
+                [
+                    "",
+                    "Create or select a local layer:",
+                    "  layer add --local local-edits",
+                    "  layer write local-edits",
+                ]
+            )
+    if buildtree.get("stale_owned"):
+        lines.extend(["", "Stale owned files:"])
+        for rel_path in buildtree["stale_owned"]:
+            lines.append(f"  {rel_path}")
+
+    return "\n".join(lines)
+
+
+def status_layer_row(layer: dict[str, Any], write_layer: str | None, enabled_count: int) -> list[str]:
+    enabled = "enabled" if layer.get("enabled") else "disabled"
+    branch = layer.get("branch") or "-"
+    commit = layer.get("commit") or "no commits"
+    flags = []
+    if write_layer == layer.get("name"):
+        flags.append("write-layer")
+    if layer.get("top"):
+        flags.append("top")
+    if layer.get("position") == "bottom" or (enabled_count == 1 and layer.get("enabled") and layer.get("top")):
+        flags.append("bottom")
+    return [
+        str(layer["index"]),
+        layer["name"],
+        layer.get("kind", "git"),
+        enabled,
+        status_git_label(layer.get("status")),
+        branch,
+        commit,
+        ", ".join(flags) or "-",
+    ]
+
+
+def status_git_label(status: str | None) -> str:
+    if status == "modified":
+        return "dirty"
+    return status or "-"
+
+
+def format_status_row(row: list[str], widths: list[int]) -> str:
+    return "  ".join(value.ljust(widths[index]) for index, value in enumerate(row)).rstrip()
 
 
 def explain_file(root: Path, rel_path: str, manifest: dict[str, Any] | None = None) -> dict[str, Any] | None:

@@ -197,6 +197,51 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertEqual(data["layers"][0]["kind"], "local")
         self.assertTrue(data["layers"][0]["enabled"])
 
+    def test_status_default_output_shows_stack_top_to_bottom(self) -> None:
+        product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
+        cached_file = self.workspace / ".layer" / "cache" / "product" / "src" / "main.c"
+        cached_file.write_text("dirty\n")
+
+        result = self.run_layer("status")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LayerGit status", result.stdout)
+        self.assertIn(f"Workspace: {self.workspace}", result.stdout)
+        self.assertIn("Output:    ./buildtree", result.stdout)
+        self.assertIn("Order:     top -> bottom; higher layers win path conflicts", result.stdout)
+        self.assertIn("Write:     workspace-base", result.stdout)
+        self.assertIn("ORDER", result.stdout)
+        table_lines = [line for line in result.stdout.splitlines() if line.strip()[:1].isdigit()]
+        product_line = next(line for line in table_lines if "product" in line)
+        base_line = next(line for line in table_lines if "workspace-base" in line)
+        self.assertLess(result.stdout.index(product_line), result.stdout.index(base_line))
+        self.assertRegex(product_line, r"^\s*2\s+product\s+git\s+enabled\s+dirty\s+main\s+[0-9a-f]+\s+top$")
+        self.assertIn("1", base_line)
+        self.assertIn("workspace-base", base_line)
+        self.assertIn("local", base_line)
+        self.assertIn("enabled", base_line)
+        self.assertIn("clean", base_line)
+        self.assertIn("no commits", base_line)
+        self.assertIn("write-layer, bottom", base_line)
+        self.assertIn("  2 layers enabled", result.stdout)
+        self.assertIn("  0 disabled", result.stdout)
+        self.assertIn("  1 dirty", result.stdout)
+        self.assertIn("  0 conflicts", result.stdout)
+
+    def test_status_short_preserves_compact_output(self) -> None:
+        product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
+
+        result = self.run_layer("status", "--short")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Layers:", result.stdout)
+        self.assertIn("Write layer: workspace-base", result.stdout)
+        self.assertIn("Buildtree:", result.stdout)
+
     def test_git_layers_added_after_default_base_are_above_it(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
         self.assertEqual(self.run_layer("init").returncode, 0)
@@ -379,7 +424,9 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertTrue((self.workspace / ".layer" / "cache" / "component-c").exists())
         self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "from b\n")
         status = self.run_layer("status")
-        self.assertIn("component-c      git   disabled", status.stdout)
+        disabled_line = next(line for line in status.stdout.splitlines() if "component-c" in line)
+        self.assertIn("git", disabled_line)
+        self.assertIn("disabled", disabled_line)
 
         enabled = self.run_layer("enable", "component-c")
 
@@ -1100,6 +1147,7 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("usage: layer status", result.stdout)
         self.assertIn("--json", result.stdout)
+        self.assertIn("--short", result.stdout)
 
     def test_compose_help_mentions_clean_behavior(self) -> None:
         result = self.run_layer("help", "compose")

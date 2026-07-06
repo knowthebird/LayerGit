@@ -27,6 +27,7 @@ from .reports import (
     explain_json,
     format_explain,
     format_status,
+    format_status_short,
     layer_list,
     workspace_status,
 )
@@ -71,6 +72,7 @@ These are common LayerGit commands used in various situations:
 
 Workspace:
   status              Show workspace and layer status
+  status --short      Show compact workspace status
   compose             Regenerate the composed output tree
   compose --clean     Remove the output tree and regenerate from scratch
   tree                Show the composed tree
@@ -190,6 +192,7 @@ def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="Show workspace status")
     status.add_argument("--json", action="store_true")
+    status.add_argument("--short", action="store_true", help="show compact status output")
 
     list_cmd = sub.add_parser("list", help="List configured layers")
     list_cmd.add_argument("--json", action="store_true")
@@ -517,6 +520,8 @@ def cmd_status(root: Path, args: argparse.Namespace) -> int:
     status = workspace_status(root, manifest)
     if args.json:
         print(json.dumps(status, indent=2, sort_keys=True))
+    elif args.short:
+        print(format_status_short(status))
     else:
         print(format_status(status))
     return 0
@@ -528,7 +533,7 @@ def cmd_list(root: Path, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
     else:
-        print(format_status({"layers": data["layers"], "composed_tree": {"output": data["output"], "visible_files": 0, "masked_files": 0, "conflicts": 0, "warnings": 0}, "conflicts": [], "warnings": [], "modified_files": []}).split("\n\n")[0])
+        print(format_status_short({"layers": data["layers"], "composed_tree": {"output": data["output"], "visible_files": 0, "masked_files": 0, "conflicts": 0, "warnings": 0}, "conflicts": [], "warnings": [], "modified_files": []}).split("\n\n")[0])
     return 0
 
 
