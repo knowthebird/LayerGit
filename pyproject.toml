@@ -7,8 +7,28 @@ name = "layergit"
 version = "0.1.0"
 description = "Prototype CLI for composing layered Git workspaces."
 readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "LayerGit contributors" }]
 requires-python = ">=3.10"
 dependencies = ["PyYAML>=6"]
+keywords = ["git", "workspace", "layers", "composition", "developer-tools"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Version Control :: Git",
+]
+
+[project.urls]
+Homepage = "https://github.com/knowthebird/LayerGit"
+Repository = "https://github.com/knowthebird/LayerGit"
+Issues = "https://github.com/knowthebird/LayerGit/issues"
 
 [project.optional-dependencies]
 dev = ["coverage>=7.6"]

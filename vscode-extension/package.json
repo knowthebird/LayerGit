@@ -4,6 +4,12 @@
   "description": "Thin VS Code UI over the LayerGit CLI.",
   "version": "0.0.1",
   "publisher": "layergit",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/knowthebird/LayerGit.git",
+    "directory": "vscode-extension"
+  },
   "engines": {
     "vscode": "^1.92.0"
   },
@@ -221,11 +227,13 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-yarn --out layergit-vscode-0.0.1.vsix"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
     "@types/vscode": "^1.92.0",
+    "@vscode/vsce": "3.9.2",
     "typescript": "^5.5.4"
   }
 }

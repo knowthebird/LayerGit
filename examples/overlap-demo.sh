@@ -45,23 +45,34 @@ printf 'Repos:     %s\n\n' "$repos"
   cd "$workspace"
 
   "${layer_cmd[@]}" init --output ./buildtree
-  "${layer_cmd[@]}" add "$repos/base" --name base
-  "${layer_cmd[@]}" add "$repos/product" --name product
+  "${layer_cmd[@]}" add "$repos/base" base
+  "${layer_cmd[@]}" add "$repos/product" product
 
-  printf '\nTop layer wins by default:\n'
+  printf '\nConfigured layers:\n'
+  "${layer_cmd[@]}" status
+
+  printf '\nTop layer wins by default for common/util.c:\n'
   cat buildtree/common/util.c
 
   printf '\nProvenance for common/util.c:\n'
   "${layer_cmd[@]}" explain common/util.c
 
   printf '\nSelect the lower base layer for common/util.c:\n'
-  "${layer_cmd[@]}" usefile base common/util.c
+  "${layer_cmd[@]}" use common/util.c base
 
-  printf '\nAfter layer usefile:\n'
+  printf '\nAfter layer use:\n'
   cat buildtree/common/util.c
 
   printf '\nUpdated provenance:\n'
   "${layer_cmd[@]}" explain common/util.c
+
+  printf '\nEdit buildtree/common/util.c and apply it back to the selected owner:\n'
+  printf 'base util with local edit\n' > buildtree/common/util.c
+  "${layer_cmd[@]}" diff common/util.c
+  "${layer_cmd[@]}" apply common/util.c
+
+  printf '\nGit status in the base layer after apply:\n'
+  "${layer_cmd[@]}" -L base git status --short
 
   printf '\nExport composed result:\n'
   "${layer_cmd[@]}" export "$tmp_root/exported" --with-provenance

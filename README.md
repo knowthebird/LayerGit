@@ -1,16 +1,58 @@
 # LayerGit
 
+[![CI](https://github.com/knowthebird/LayerGit/actions/workflows/ci.yml/badge.svg)](https://github.com/knowthebird/LayerGit/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 LayerGit lets multiple Git repositories appear together in one generated workspace.
 
 It is not a replacement for Git. Each layer is still a normal Git repository. LayerGit adds a generated `buildtree/` where files from those repositories are composed together in layer order, so an IDE, build system, or workflow can see one directory structure instead of several separate repos.
 
-When two layers provide the same path, the higher layer wins by default. The lower file is masked, not deleted, and LayerGit records provenance so you can see which layer provided the visible file.
+When two layers provide the same path, the higher layer wins by default. The lower file is masked, not deleted, and LayerGit records provenance so you can see which layer provided the visible file. You can override the default choice for specific files, move layers to change precedence, and apply buildtree/ changes back to the appropriate layer repos.
 
 LayerGit is meant for projects where the source needs to stay split across repositories, but the tools around the project expect one shared workspace.
 
-> Status: early alpha. LayerGit has unit tests and invariant tests, but
-> it is still new. Use normal Git backups and review `layer status` and
-> `layer diff` before applying changes to important repositories.
+> Status: early alpha. LayerGit has unit tests and invariant tests, but it is still new. Use normal Git backups and review `layer status` and `layer diff` before applying changes to important repositories.
+
+## Install
+
+Install the CLI directly from GitHub:
+
+```bash
+python -m pip install git+https://github.com/knowthebird/LayerGit.git
+layer --help
+```
+
+Or install it as an isolated command with `pipx`:
+
+```bash
+pipx install git+https://github.com/knowthebird/LayerGit.git
+layer --help
+```
+
+For local development from a checkout, use a virtual environment:
+
+```bash
+git clone https://github.com/knowthebird/LayerGit.git
+cd LayerGit
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+layer --help
+```
+
+The installed package exposes both `layer` and `layergit`; `layer` is the
+intended day-to-day command.
+
+## Try The Demo
+
+The overlap demo is local and network-free after the package is installed. It
+creates temporary Git repositories, composes them into a workspace, shows masked
+file provenance, selects a different layer for one file, applies a buildtree edit
+back to the selected layer, and exports the result.
+
+```bash
+examples/overlap-demo.sh
+```
 
 ## Why LayerGit?
 
@@ -81,15 +123,6 @@ provenance, and Git passthrough just like repo-backed layers.
 The LayerGit source checkout and the workspace you compose with LayerGit can be
 different directories. Install the CLI from this repo, then run `layer init`
 inside the workspace you want LayerGit to manage.
-
-Install the CLI from a local checkout:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
-layer --help
-```
 
 Use one directory as the LayerGit workspace, then add existing Git repositories as
 layers. Source repositories can live anywhere; LayerGit clones them into
@@ -340,6 +373,11 @@ After changing TypeScript, rerun `npm run compile` or leave `npm run watch`
 running, then reload the Extension Development Host window. Changes to
 `vscode-extension/package.json` require stopping and starting the debug session.
 
+Packaging a `.vsix` requires Node.js 20 or newer because the VS Code packaging
+toolchain uses Node 20-only dependencies. If your distro `npm` installed Node
+18, `npm ci` and `npm run compile` can still work for extension development, but
+run `npm run package` with Node 20.
+
 ## Development
 
 Run Python tests without external test dependencies:
@@ -371,6 +409,20 @@ cd vscode-extension
 npm ci
 npm run compile
 ```
+
+Package a local VSIX:
+
+```bash
+cd vscode-extension
+# requires Node.js 20 or newer
+npm ci
+npm run compile
+npm run package
+code --install-extension layergit-vscode-0.0.1.vsix
+```
+
+The packaged extension still shells out to the Python CLI, so install `layer`
+first with `pipx`, `pip`, or the local development venv shown above.
 
 `layer init` writes a workspace `.gitignore` for `.layer/` and the configured
 output tree so standard Git from the workspace root tracks configuration and

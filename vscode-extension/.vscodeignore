@@ -2,7 +2,14 @@
 .vscode-test/**
 src/**
 node_modules/**
+.venv/**
+*.vsix
 *.map
+out/**/*.map
+extension/out/**/*.map
+!out/**/*.js
+!extension/out/**/*.js
+package-lock.json
 tsconfig.json
 webpack.config.js
 README.md
