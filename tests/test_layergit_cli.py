@@ -78,6 +78,49 @@ class LayerGitCliTest(unittest.TestCase):
         )
         return repo
 
+    def read_json(self, path: Path) -> dict:
+        return json.loads(path.read_text())
+
+    def ownership(self) -> dict:
+        return self.read_json(self.workspace / ".layer" / "ownership.json")
+
+    def status_json(self) -> dict:
+        result = self.run_layer("status", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def tree_json(self) -> dict:
+        result = self.run_layer("tree", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def assert_current_ownership_matches_buildtree(self, disabled_layers: set[str] | None = None) -> None:
+        disabled_layers = disabled_layers or set()
+        ownership = self.ownership()
+        tree = self.tree_json()
+        output_files = {
+            path.relative_to(self.workspace / "buildtree").as_posix()
+            for path in (self.workspace / "buildtree").rglob("*")
+            if path.is_file()
+        }
+        visible_owned = {
+            rel_path: entry["visible"]
+            for rel_path, entry in ownership.items()
+            if entry.get("visible") is not None
+        }
+        tree_visible = {
+            item["path"]: item
+            for item in tree["files"]
+            if item.get("owned") and item.get("ownership") == "composed" and item.get("visibleLayer")
+        }
+
+        self.assertEqual(set(visible_owned), output_files & set(visible_owned))
+        self.assertEqual(set(tree_visible), set(visible_owned))
+        for rel_path, visible in visible_owned.items():
+            self.assertNotIn(visible["layer"], disabled_layers)
+            self.assertEqual(tree_visible[rel_path]["visibleLayer"], visible["layer"])
+            self.assertNotIn(visible["layer"], {item["layer"] for item in ownership[rel_path].get("masked", [])})
+
     def test_init_creates_workspace_files(self) -> None:
         result = self.run_layer("init", "--output", "./buildtree")
 
@@ -553,6 +596,186 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(untracked.exists())
         self.assertTrue((self.workspace / "buildtree" / "src" / "main.c").exists())
+
+    def test_invariant_compose_preserves_unowned_and_reports_it(self) -> None:
+        product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
+        unowned = self.workspace / "buildtree" / "output.bin"
+        unowned.write_text("artifact\n")
+
+        result = self.run_layer("compose")
+        status = self.status_json()
+        tree = self.tree_json()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(unowned.exists())
+        self.assertEqual(status["buildtree"]["untracked"], ["output.bin"])
+        item = next(item for item in tree["files"] if item["path"] == "output.bin")
+        self.assertFalse(item["owned"])
+        self.assertEqual(item["ownership"], "untracked")
+
+    def test_invariant_compose_removes_stale_owned_without_making_it_untracked(self) -> None:
+        base = self.make_repo("base", {"base.c": "base\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.ownership()["base.c"]["visible"]["layer"], "base")
+
+        disabled = self.run_layer("disable", "base")
+        status = self.status_json()
+        tree = self.tree_json()
+
+        self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        self.assertFalse((self.workspace / "buildtree" / "base.c").exists())
+        self.assertEqual(status["buildtree"]["untracked"], [])
+        self.assertEqual(status["composed_tree"]["visible_files"], 0)
+        self.assertNotIn("base.c", {item["path"] for item in tree["files"] if item["ownership"] == "untracked"})
+
+    def test_invariant_ownership_metadata_matches_visible_buildtree_files(self) -> None:
+        base = self.make_repo("base", {"common/util.c": "base\n", "base.c": "base\n"})
+        top = self.make_repo("top", {"common/util.c": "top\n", "top.c": "top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+
+        self.assert_current_ownership_matches_buildtree()
+        ownership = self.ownership()
+        self.assertEqual(ownership["common/util.c"]["visible"]["layer"], "top")
+        self.assertEqual([item["layer"] for item in ownership["common/util.c"]["masked"]], ["base"])
+
+    def test_invariant_top_layer_wins_is_deterministic_across_recompose(self) -> None:
+        base = self.make_repo("base", {"common/util.c": "base\n"})
+        top = self.make_repo("top", {"common/util.c": "top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+
+        for _ in range(3):
+            result = self.run_layer("compose")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "top\n")
+            ownership = self.ownership()["common/util.c"]
+            self.assertEqual(ownership["visible"]["layer"], "top")
+            self.assertEqual([item["layer"] for item in ownership["masked"]], ["base"])
+
+    def test_invariant_layer_use_changes_only_selected_path(self) -> None:
+        base = self.make_repo("base", {"common/util.c": "base util\n", "common/other.c": "base other\n"})
+        top = self.make_repo("top", {"common/util.c": "top util\n", "common/other.c": "top other\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+
+        result = self.run_layer("use", "common/util.c", "base")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "base util\n")
+        self.assertEqual((self.workspace / "buildtree" / "common" / "other.c").read_text(), "top other\n")
+        ownership = self.ownership()
+        self.assertEqual(ownership["common/util.c"]["visible"]["layer"], "base")
+        self.assertEqual(ownership["common/other.c"]["visible"]["layer"], "top")
+
+    def test_invariant_disabling_higher_layer_unmasks_lower_layer(self) -> None:
+        base = self.make_repo("base", {"common/util.c": "base\n"})
+        top = self.make_repo("top", {"common/util.c": "top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "top\n")
+
+        disabled = self.run_layer("disable", "top")
+
+        self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "base\n")
+        self.assertEqual(self.ownership()["common/util.c"]["visible"]["layer"], "base")
+        self.assert_current_ownership_matches_buildtree(disabled_layers={"top"})
+
+    def test_invariant_apply_updates_visible_owner_only(self) -> None:
+        base = self.make_repo("base", {"common/util.c": "base\n"})
+        top = self.make_repo("top", {"common/util.c": "top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("edited\n")
+
+        result = self.run_layer("apply", "common/util.c")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.workspace / ".layer" / "cache" / "top" / "common" / "util.c").read_text(), "edited\n")
+        self.assertEqual((self.workspace / ".layer" / "cache" / "base" / "common" / "util.c").read_text(), "base\n")
+        base_status = self.run_layer("-L", "base", "git", "status", "--short")
+        top_status = self.run_layer("-L", "top", "git", "status", "--short")
+        self.assertEqual(base_status.stdout, "")
+        self.assertIn("M common/util.c", top_status.stdout)
+
+    def test_invariant_apply_new_writes_only_write_layer_and_does_not_stage(self) -> None:
+        product = self.make_repo("product", {"src/main.c": "ok\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
+        new_file = self.workspace / "buildtree" / "newfile.c"
+        new_file.write_text("new\n")
+
+        result = self.run_layer("apply", "--new")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.workspace / ".layer" / "cache" / "workspace-base" / "newfile.c").read_text(), "new\n")
+        self.assertFalse((self.workspace / ".layer" / "cache" / "product" / "newfile.c").exists())
+        write_status = self.run_layer("-L", "workspace-base", "git", "status", "--short")
+        product_status = self.run_layer("-L", "product", "git", "status", "--short")
+        self.assertIn("?? newfile.c", write_status.stdout)
+        self.assertEqual(product_status.stdout, "")
+
+    def test_invariant_apply_rejects_path_traversal_without_writing_outside_cache(self) -> None:
+        product = self.make_repo("product", {"src/main.c": "ok\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
+        outside = self.base / "outside.txt"
+
+        for bad_path in ("../outside.txt", str(outside), "subdir/../../outside.txt"):
+            result = self.run_layer("apply", bad_path)
+            self.assertNotEqual(result.returncode, 0, bad_path)
+
+        self.assertFalse(outside.exists())
+        self.assertFalse((self.workspace / ".layer" / "cache" / "workspace-base" / "outside.txt").exists())
+        self.assertFalse((self.workspace / ".layer" / "cache" / "product" / "outside.txt").exists())
+
+    def test_invariant_compose_clean_is_explicitly_destructive_only_for_output_tree(self) -> None:
+        product = self.make_repo("product", {"src/main.c": "ok\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
+        unowned = self.workspace / "buildtree" / "output.bin"
+        unowned.write_text("artifact\n")
+
+        normal = self.run_layer("compose")
+        self.assertEqual(normal.returncode, 0, normal.stdout + normal.stderr)
+        self.assertTrue(unowned.exists())
+
+        clean = self.run_layer("compose", "--clean")
+
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+        self.assertFalse(unowned.exists())
+        self.assertEqual((self.workspace / "buildtree" / "src" / "main.c").read_text(), "ok\n")
+        self.assertTrue((self.workspace / ".layer" / "cache" / "product" / "src" / "main.c").exists())
+
+    def test_invariant_stale_ownership_metadata_is_not_current_valid_state(self) -> None:
+        product = self.make_repo("product", {"src/main.c": "ok\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
+        manifest_data = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        manifest_data["layers"] = []
+        (self.workspace / "layer.yaml").write_text(yaml.safe_dump(manifest_data, sort_keys=False))
+
+        status = self.status_json()
+        tree = self.tree_json()
+        explain = self.run_layer("explain", "src/main.c", "--json")
+
+        self.assertEqual(status["composed_tree"]["visible_files"], 0)
+        self.assertEqual(status["composed_tree"]["masked_files"], 0)
+        self.assertEqual(status["composed_tree"]["stale_owned_files"], 1)
+        self.assertEqual(status["composed_tree"]["untracked_files"], 0)
+        self.assertEqual(tree["files"][0]["ownership"], "stale")
+        explain_data = json.loads(explain.stdout)
+        self.assertTrue(explain_data["stale_owned"])
+        self.assertIn("previously owned by LayerGit", explain_data["reason"])
 
     def test_extension_json_list_tree_and_explain_are_valid(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})

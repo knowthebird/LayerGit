@@ -8,9 +8,9 @@ When two layers provide the same path, the higher layer wins by default. The low
 
 LayerGit is meant for projects where the source needs to stay split across repositories, but the tools around the project expect one shared workspace.
 
-> Status: early prototype. Use on copied/test repositories first. LayerGit writes
-> generated output to `buildtree/` and stores cloned or local layer repos under
-> `.layer/cache/`.
+> Status: early alpha. LayerGit has unit tests and invariant tests, but
+> it is still new. Use normal Git backups and review `layer status` and
+> `layer diff` before applying changes to important repositories.
 
 ## Why LayerGit?
 
