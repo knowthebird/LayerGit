@@ -30,8 +30,21 @@ class LayerGitCliTest(unittest.TestCase):
     def run_layer(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT)
+        command = [sys.executable, "-m", "layergit.cli", *args]
+        if env.get("LAYERGIT_TEST_COVERAGE") == "1":
+            env["COVERAGE_FILE"] = str(ROOT / ".coverage")
+            command = [
+                sys.executable,
+                "-m",
+                "coverage",
+                "run",
+                "--parallel-mode",
+                "-m",
+                "layergit.cli",
+                *args,
+            ]
         return subprocess.run(
-            [sys.executable, "-m", "layergit.cli", *args],
+            command,
             cwd=cwd or self.workspace,
             env=env,
             text=True,
@@ -667,6 +680,130 @@ class LayerGitCliTest(unittest.TestCase):
         deleted = self.run_layer("apply", "--delete", "old/file.c")
         self.assertEqual(deleted.returncode, 0, deleted.stdout + deleted.stderr)
         self.assertFalse((self.workspace / ".layer" / "cache" / "component-b" / "old" / "file.c").exists())
+
+    def test_cli_validation_edges_for_init_add_apply_and_git(self) -> None:
+        product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
+
+        missing_manifest = self.run_layer("add")
+        self.assertNotEqual(missing_manifest.returncode, 0)
+        self.assertIn("No layer.yaml", missing_manifest.stderr)
+
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertNotEqual(self.run_layer("init").returncode, 0)
+        self.assertIn("layer.yaml already exists", self.run_layer("init").stderr)
+        self.assertIn("add requires a repo path", self.run_layer("add").stderr)
+        self.assertIn("Use `layer add --local <name>`", self.run_layer("add", "--local").stderr)
+        self.assertIn("Use `layer add --local <name>`", self.run_layer("add", "--local", "a", "b").stderr)
+        self.assertIn("--revision is only valid", self.run_layer("add", "--local", "local-rev", "--revision", "main").stderr)
+
+        first = self.run_layer("add", str(product), "product", "--no-compose")
+        duplicate = self.run_layer("add", str(product), "product")
+        revision = self.run_layer("add", str(product), "product-rev", "--revision", "HEAD", "--no-compose")
+        inferred_duplicate = self.run_layer("add", str(product), "--no-compose")
+        no_args_apply = self.run_layer("apply")
+        missing_git_args = self.run_layer("-L", "product", "git")
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn("Layer `product` already exists", duplicate.stderr)
+        self.assertEqual(revision.returncode, 0, revision.stdout + revision.stderr)
+        self.assertIn("repo-a", inferred_duplicate.stdout)
+        self.assertIn("apply requires a path", no_args_apply.stderr)
+        self.assertIn("Missing git command", missing_git_args.stderr)
+
+    def test_cli_remove_list_tree_compose_and_pull_edges(self) -> None:
+        product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
+        other = self.make_repo("repo-b", {"README.md": "readme\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(other), "other").returncode, 0)
+
+        list_plain = self.run_layer("list")
+        tree_plain = self.run_layer("tree")
+        compose_json = self.run_layer("compose", "--json")
+        pull_checked = self.run_layer("pull", "product", "--no-compose")
+        remove_many = self.run_layer("remove", "all")
+        git_many = self.run_layer("-L", "all", "git", "status")
+        explain_plain = self.run_layer("explain", "src/main.c")
+        removed = self.run_layer("remove", "other", "--delete-cache")
+
+        self.assertEqual(list_plain.returncode, 0, list_plain.stderr)
+        self.assertIn("product", list_plain.stdout)
+        self.assertEqual(tree_plain.returncode, 0, tree_plain.stderr)
+        self.assertIn("src/main.c -> product", tree_plain.stdout)
+        self.assertEqual(compose_json.returncode, 0, compose_json.stderr)
+        self.assertIn("visible_files", json.loads(compose_json.stdout))
+        self.assertEqual(pull_checked.returncode, 0, pull_checked.stdout + pull_checked.stderr)
+        self.assertIn("Pulled 1 layer", pull_checked.stdout)
+        self.assertIn("remove expects exactly one layer", remove_many.stderr)
+        self.assertIn("git requires exactly one layer", git_many.stderr)
+        self.assertIn("Visible file:", explain_plain.stdout)
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertFalse((self.workspace / ".layer" / "cache" / "other").exists())
+
+    def test_cli_move_use_unuse_write_and_help_edges(self) -> None:
+        repo_a = self.make_repo("repo-a", {"common/util.c": "a\n"})
+        repo_b = self.make_repo("repo-b", {"common/util.c": "b\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_a), "a").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_b), "b").returncode, 0)
+
+        self.assertEqual(self.run_layer("move", "a", "up").returncode, 0)
+        self.assertEqual(self.run_layer("move", "a", "down").returncode, 0)
+        self.assertEqual(self.run_layer("move", "a", "before", "b").returncode, 0)
+        self.assertEqual(self.run_layer("move", "a", "after", "b").returncode, 0)
+        self.assertIn("move before requires", self.run_layer("move", "a", "before").stderr)
+        self.assertIn("move after requires", self.run_layer("move", "a", "after").stderr)
+        self.assertIn("layer movement expects", self.run_layer("move", "all", "top").stderr)
+        self.assertIn("Unknown layer", self.run_layer("use", "common/util.c", "missing").stderr)
+
+        self.assertEqual(self.run_layer("disable", "b").returncode, 0)
+        self.assertIn("disabled", self.run_layer("use", "common/util.c", "b").stderr)
+        self.assertEqual(self.run_layer("enable", "b").returncode, 0)
+        self.assertIn("enable/disable expects", self.run_layer("disable", "all").stderr)
+        self.assertIn("write expects", self.run_layer("write", "all").stderr)
+        self.assertIn("No explicit file selection", self.run_layer("unuse", "none.c").stdout)
+        self.assertEqual(self.run_layer("use", "common/util.c", "a").returncode, 0)
+        manifest_data = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        manifest_data.setdefault("file_precedence", {})["common/util.c"] = {"order": ["b"]}
+        (self.workspace / "layer.yaml").write_text(yaml.safe_dump(manifest_data, sort_keys=False))
+        self.assertEqual(self.run_layer("unuse", "common/util.c").returncode, 0)
+        self.assertNotIn("file_precedence", yaml.safe_load((self.workspace / "layer.yaml").read_text()))
+        self.assertEqual(self.run_layer("help").returncode, 0)
+        self.assertIn("not a layer command", self.run_layer("help", "missing").stderr)
+
+    def test_cli_conflicts_warnings_merge_and_diff_no_changes(self) -> None:
+        repo_a = self.make_repo("repo-a", {"common/util.c": "a\n", "a/dup.c": "a\n"})
+        repo_b = self.make_repo("repo-b", {"common/util.c": "b\n", "b/dup.c": "b\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_a), "a").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_b), "b").returncode, 0)
+
+        no_diff = self.run_layer("diff")
+        no_apply = self.run_layer("apply", "--all")
+        self.assertIn("No buildtree changes.", no_diff.stdout)
+        self.assertIn("No buildtree changes to apply.", no_apply.stdout)
+
+        manifest_data = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        manifest_data["conflicts"]["forbid_duplicate_basenames"] = ["**/*.c"]
+        (self.workspace / "layer.yaml").write_text(yaml.safe_dump(manifest_data, sort_keys=False))
+        warning = self.run_layer("compose")
+        self.assertEqual(warning.returncode, 0, warning.stdout + warning.stderr)
+        self.assertIn("WARNING:", warning.stdout)
+
+        manifest_data = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        manifest_data["composition"]["same_path_policy"] = "error"
+        (self.workspace / "layer.yaml").write_text(yaml.safe_dump(manifest_data, sort_keys=False))
+        conflict = self.run_layer("compose")
+        self.assertNotEqual(conflict.returncode, 0)
+        self.assertIn("ERROR:", conflict.stdout)
+
+        manifest_data["composition"]["same_path_policy"] = "top_wins"
+        manifest_data["conflicts"].pop("forbid_duplicate_basenames", None)
+        (self.workspace / "layer.yaml").write_text(yaml.safe_dump(manifest_data, sort_keys=False))
+        self.assertEqual(self.run_layer("compose").returncode, 0)
+        merged = self.run_layer("merge", "1..2", "--name", "merged", "--with-provenance", "--init-git")
+        self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
+        self.assertTrue((self.workspace / ".layer" / "cache" / "merged" / ".git").exists())
 
     def test_layer_scoped_git_uses_global_layer_selector(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "before\n"})

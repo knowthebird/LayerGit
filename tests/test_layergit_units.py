@@ -1,0 +1,615 @@
+from __future__ import annotations
+
+import json
+import contextlib
+import io
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from layergit import cli, composer, exporter, gitops, manifest, merger, reports, selectors, worktree
+from layergit.errors import LayerError
+
+
+class LayerGitUnitTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_selectors_cover_supported_forms_and_errors(self) -> None:
+        layers = [
+            {"name": "base", "enabled": True},
+            {"name": "mid", "enabled": False},
+            {"name": "top", "enabled": True},
+        ]
+
+        self.assertEqual(selectors.select_layers([], "all"), [])
+        self.assertEqual(selectors.select_layers(layers, None), [0, 1, 2])
+        self.assertEqual(selectors.select_layers(layers, "all", enabled_only_for_default=True), [0, 2])
+        self.assertEqual(selectors.select_layers(layers, "all-layers"), [0, 1, 2])
+        self.assertEqual(selectors.select_layers(layers, "enabled"), [0, 2])
+        self.assertEqual(selectors.select_layers(layers, "disabled"), [1])
+        self.assertEqual(selectors.select_layers(layers, "top"), [2])
+        self.assertEqual(selectors.select_layers(layers, "top", enabled_only_for_default=True), [2])
+        self.assertEqual(selectors.select_layers(layers, "1,top,1"), [0, 2])
+        self.assertEqual(selectors.select_layers(layers, "1..2"), [0, 1])
+        self.assertEqual(selectors.select_layers(layers, "2"), [1])
+        self.assertEqual(selectors.select_layers(layers, "mid"), [1])
+        self.assertEqual(selectors.insertion_index(layers, before=None, after=None, top=True), 3)
+        self.assertEqual(selectors.insertion_index(layers, before="mid", after=None, top=False), 1)
+        self.assertEqual(selectors.insertion_index(layers, before=None, after="mid", top=False), 2)
+
+        with self.assertRaisesRegex(LayerError, "Invalid selector range"):
+            selectors.select_layers(layers, "2..1")
+        with self.assertRaisesRegex(LayerError, "Expected a layer index"):
+            selectors.one_based_index(layers, "base")
+        with self.assertRaisesRegex(LayerError, "Layer index out of range"):
+            selectors.select_layers(layers, "4")
+        with self.assertRaisesRegex(LayerError, "No layer matches"):
+            selectors.select_layers(layers, "missing")
+        with self.assertRaisesRegex(LayerError, "Use only one"):
+            selectors.insertion_index(layers, before="base", after="top", top=False)
+
+    def test_gitops_covers_error_and_status_branches(self) -> None:
+        missing = self.root / "missing"
+        self.assertIsNone(gitops.current_commit(missing))
+        self.assertIsNone(gitops.current_branch(missing))
+        self.assertEqual(gitops.porcelain_status(missing), "missing")
+        self.assertEqual(gitops.tracked_files(missing), [])
+
+        with patch("layergit.gitops.run_git", side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(LayerError, "git executable"):
+                gitops.is_git_repo(self.root)
+
+        with patch("layergit.gitops.run_git") as run_git:
+            run_git.return_value = subprocess.CompletedProcess([], 1, "", "")
+            self.assertFalse(gitops.is_git_repo(self.root))
+
+        with patch("layergit.gitops.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 1, "", ""),
+            ]
+            self.assertIsNone(gitops.current_commit(self.root))
+
+        with patch("layergit.gitops.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+            ]
+            self.assertEqual(gitops.current_branch(self.root), "detached")
+
+        with patch("layergit.gitops.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 1, "", ""),
+            ]
+            self.assertIsNone(gitops.current_branch(self.root))
+
+        with patch("layergit.gitops.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 1, "", ""),
+            ]
+            self.assertEqual(gitops.porcelain_status(self.root), "error")
+
+        with patch("layergit.gitops.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, " M file.c\n", ""),
+            ]
+            self.assertEqual(gitops.porcelain_status(self.root), "modified")
+
+        with patch("layergit.gitops.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 1, "", ""),
+            ]
+            self.assertEqual(gitops.tracked_files(self.root), [])
+
+        with patch("layergit.gitops.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, "abc123\n", ""),
+            ]
+            self.assertEqual(gitops.current_commit(self.root), "abc123")
+
+    def test_sync_layer_branches_are_covered_with_mocks(self) -> None:
+        layer = {"name": "repo", "repo": "/src", "revision": "main"}
+        target = gitops.layer_cache_path(self.root, "repo")
+        target.mkdir(parents=True)
+
+        with patch("layergit.gitops.is_git_repo", return_value=True), patch("layergit.gitops.run_git") as run_git:
+            run_git.return_value = subprocess.CompletedProcess([], 0, "", "")
+            gitops.sync_layer(self.root, layer)
+            self.assertEqual(run_git.call_args_list[0].args[0], ["fetch", "--all", "--prune"])
+
+        with patch("layergit.gitops.is_git_repo", return_value=True), patch("layergit.gitops.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 1, "", "fatal\n"),
+            ]
+            with self.assertRaisesRegex(LayerError, "fatal"):
+                gitops.sync_layer(self.root, layer)
+
+        with patch("layergit.gitops.is_git_repo", return_value=False), patch("layergit.gitops.run_git") as run_git:
+            gitops.ensure_local_layer_repo(self.root, "local")
+            run_git.assert_called_with(["init"], gitops.layer_cache_path(self.root, "local"))
+
+        with patch("layergit.gitops.ensure_local_layer_repo") as ensure:
+            gitops.sync_layer(self.root, {"name": "local", "kind": "local"})
+            ensure.assert_called_once_with(self.root, "local")
+
+        with self.assertRaisesRegex(LayerError, "has no repo path"):
+            gitops.sync_layer(self.root, {"name": "no-repo"})
+
+        with patch("layergit.gitops.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 1, "", "clone failed")
+            with self.assertRaisesRegex(LayerError, "clone failed"):
+                gitops.sync_layer(self.root, {"name": "new", "repo": "/src"})
+
+        with patch("layergit.gitops.subprocess.run") as run, patch("layergit.gitops.run_git") as run_git:
+            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            gitops.sync_layer(self.root, {"name": "new-rev", "repo": "/src", "revision": "v1"})
+            run_git.assert_called_once_with(["checkout", "v1"], gitops.layer_cache_path(self.root, "new-rev"))
+
+        removable = gitops.layer_cache_path(self.root, "remove-me")
+        removable.mkdir(parents=True)
+        gitops.remove_cache(self.root, "remove-me")
+        self.assertFalse(removable.exists())
+
+    def test_composer_helper_branches(self) -> None:
+        source = self.root / "source"
+        source.mkdir()
+        (source / "keep.c").write_text("keep\n")
+        (source / "skip.c").write_text("skip\n")
+        (source / "nested").mkdir()
+        with patch("layergit.composer.tracked_files", return_value=["keep.c", "skip.c", "nested"]):
+            files = composer.iter_layer_files(source, {"include": ["*.c"], "exclude": ["skip.c"]})
+        self.assertEqual(files, [("keep.c", source / "keep.c")])
+        with patch("layergit.composer.tracked_files", return_value=["keep.c"]):
+            self.assertEqual(composer.iter_layer_files(source, {"include": ["*.h"]}), [])
+        self.assertEqual(composer.matching_pattern("src/a.c", ("src/**",)), "src/**")
+
+        cached_source = gitops.layer_cache_path(self.root, "source")
+        cached_source.mkdir(parents=True)
+        (cached_source / "keep.c").write_text("keep\n")
+        (cached_source / "skip.c").write_text("skip\n")
+        with patch("layergit.composer.tracked_files", return_value=["missing.c", "keep.c", "skip.c"]):
+            providers = composer.file_providers(
+                self.root,
+                {"layers": [{"name": "source", "include": ["*.c"], "exclude": ["skip.c"]}]},
+                "keep.c",
+            )
+        self.assertEqual(providers, ["source"])
+        with patch("layergit.composer.tracked_files", return_value=["keep.c"]):
+            self.assertEqual(
+                composer.file_providers(
+                    self.root,
+                    {"layers": [{"name": "source", "enabled": False}]},
+                    "keep.c",
+                ),
+                [],
+            )
+        with patch("layergit.composer.tracked_files", return_value=[]):
+            self.assertEqual(
+                composer.file_providers(self.root, {"layers": [{"name": "source"}]}, "missing.c"),
+                [],
+            )
+        with patch("layergit.composer.tracked_files", return_value=["directory"]):
+            (cached_source / "directory").mkdir()
+            self.assertEqual(
+                composer.file_providers(self.root, {"layers": [{"name": "source"}]}, "directory"),
+                [],
+            )
+        with patch("layergit.composer.tracked_files", return_value=["keep.c"]):
+            self.assertEqual(
+                composer.file_providers(self.root, {"layers": [{"name": "source", "include": ["*.h"]}]}, "keep.c"),
+                [],
+            )
+        with patch("layergit.composer.tracked_files", return_value=["skip.c"]):
+            self.assertEqual(
+                composer.file_providers(self.root, {"layers": [{"name": "source", "exclude": ["skip.c"]}]}, "skip.c"),
+                [],
+            )
+
+        provider_a = composer.Provider(0, "a", None, "1", source, "common/util.c", source / "keep.c", ())
+        provider_b = composer.Provider(1, "b", None, "2", source, "common/util.c", source / "skip.c", ())
+        conflicts: list[dict] = []
+        warnings: list[dict] = []
+        ordered, reason, has_precedence = composer.order_providers_for_path(
+            "common/util.c",
+            [provider_a, provider_b],
+            {"file_precedence": {"common/util.c": {"order": ["b"]}}, "layers": [{"name": "a"}, {"name": "b"}]},
+            conflicts,
+            warnings,
+        )
+        self.assertEqual([item.layer_name for item in ordered], ["a", "b"])
+        self.assertTrue(has_precedence)
+        self.assertIn("file-specific", reason)
+
+        conflicts = []
+        warnings = []
+        composer.order_providers_for_path(
+            "common/util.c",
+            [provider_a],
+            {
+                "file_precedence": {"common/util.c": {"order": ["disabled", "missing"]}},
+                "layers": [{"name": "disabled", "enabled": False}, {"name": "a"}],
+            },
+            conflicts,
+            warnings,
+        )
+        self.assertEqual(warnings[0]["kind"], "disabled_file_precedence")
+        self.assertEqual(conflicts[0]["kind"], "invalid_file_precedence")
+
+        self.assertTrue(composer.override_allowed("src/a.c", provider_a, ("src/**",)))
+        self.assertEqual(composer.matching_pattern("src/a.c", ("lib/**",)), "<unknown>")
+        self.assertTrue(composer.path_matches("src/a.c", "src/**"))
+        self.assertFalse(composer.path_matches("src/a.c", "lib/**"))
+
+        conflict, warning = composer.duplicate_basename_findings(
+            {"a/foo.c": provider_a, "b/foo.c": provider_b, "hidden": None},
+            {"conflicts": {"forbid_duplicate_basenames": ["**/*.c"], "duplicate_basename_policy": "warn"}},
+        )
+        self.assertEqual(conflict, [])
+        self.assertEqual(warning[0]["kind"], "duplicate_basename")
+        conflict, warning = composer.duplicate_basename_findings(
+            {"a/foo.c": provider_a, "b/foo.c": provider_b},
+            {"conflicts": {"forbid_duplicate_basenames": ["**/*.c"], "duplicate_basename_policy": "error"}},
+        )
+        self.assertEqual(conflict[0]["kind"], "duplicate_basename")
+        self.assertEqual(warning, [])
+
+    def test_write_output_tree_clean_and_stale_paths(self) -> None:
+        output = self.root / "out"
+        source = self.root / "source.txt"
+        source.write_text("source\n")
+        stale = output / "stale" / "old.txt"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("old\n")
+        extra = output / "extra.txt"
+        extra.write_text("extra\n")
+        provider = composer.Provider(0, "a", None, None, self.root, "visible.txt", source, ())
+
+        with patch("layergit.composer.sync_layer") as sync_layer:
+            with self.assertRaisesRegex(LayerError, "Cache for layer"):
+                composer.compose(self.root, {"layers": [{"name": "missing"}]})
+            sync_layer.assert_called_once()
+
+        composer.write_output_tree(
+            output,
+            {"visible.txt": provider},
+            {"stale/old.txt": {"visible": {"layer": "a"}}},
+            clean=False,
+        )
+        self.assertFalse(stale.exists())
+        self.assertTrue((output / "visible.txt").exists())
+
+        composer.write_output_tree(output, {"visible.txt": provider}, {}, clean=True)
+        self.assertFalse(extra.exists())
+
+        blocked = output / "blocked"
+        blocked.mkdir()
+        (blocked / "child.txt").write_text("child\n")
+        composer.remove_empty_parents(blocked, output)
+        self.assertTrue(blocked.exists())
+
+    def test_reports_formatting_and_explain_edge_cases(self) -> None:
+        status = {
+            "layers": [{"index": 1, "name": "local", "kind": "local", "enabled": True, "status": "clean", "branch": "main", "commit": "abc", "top": True}],
+            "write_layer": "local",
+            "composed_tree": {"output": "./out", "visible_files": 0, "masked_files": 0, "conflicts": 0, "warnings": 0},
+            "conflicts": [{"path": "a.c", "providers": [{"layer": "a"}, {"layer": "b"}]}],
+            "warnings": [{"path": "b.c", "providers": [{"layer": "a"}]}],
+            "modified_files": [{"path": "c.c", "layer": "a"}],
+            "buildtree": {"untracked": ["new.c"], "stale_owned": ["stale.c"]},
+        }
+        formatted = reports.format_status(status)
+        self.assertIn("Write layer: local", formatted)
+        self.assertIn("stale.c", formatted)
+        no_layers = {**status, "layers": [], "write_layer": None}
+        no_layers_text = reports.format_status(no_layers)
+        self.assertIn("<none>", no_layers_text)
+        self.assertIn("Create or select a local layer", no_layers_text)
+
+        self.assertEqual(reports.layer_position(2, [1, 2, 3]), None)
+        self.assertEqual(reports.iter_output_files(self.root / "missing"), [])
+        self.assertEqual(reports.current_ownership_entry({"visible": {"layer": "x"}}, set()), None)
+        self.assertEqual(reports.current_ownership_entry({"visible": {"layer": "x"}}, {"y"}), None)
+        self.assertEqual(
+            reports.current_ownership_entry(
+                {"visible": None, "hidden": True, "selected_layer": "x", "masked": [{"layer": "x"}]},
+                {"x"},
+            )["masked"],
+            [{"layer": "x"}],
+        )
+        self.assertEqual(reports.current_findings([{"providers": []}], {"x"}), [])
+        self.assertEqual(reports.current_findings([{"providers": [{"layer": "x"}]}], {"x"}), [{"providers": [{"layer": "x"}]}])
+
+        out = self.root / "out"
+        out.mkdir()
+        (out / "changed.c").write_text("changed\n")
+        cache = gitops.layer_cache_path(self.root, "a")
+        cache.mkdir(parents=True)
+        (cache / "changed.c").write_text("original\n")
+        self.assertEqual(
+            reports.modified_output_files(
+                self.root,
+                {"workspace": {"output": "./out"}},
+                {"skip.c": {"visible": None}, "changed.c": {"visible": {"layer": "a", "source_path": "changed.c"}}},
+            ),
+            [{"path": "changed.c", "layer": "a"}],
+        )
+
+        layer = {"name": "disabled", "enabled": False}
+        cache = gitops.layer_cache_path(self.root, "disabled")
+        cache.mkdir(parents=True)
+        with patch("layergit.composer.tracked_files", return_value=["ghost.c"]):
+            (cache / "ghost.c").write_text("ghost\n")
+            entry = reports.explain_file(self.root, "ghost.c", {"workspace": {"output": "./out"}, "layers": [layer]})
+        self.assertEqual(entry["disabled_providers"][0]["layer"], "disabled")
+        self.assertIn("Disabled providers", reports.format_explain("ghost.c", entry))
+        with patch("layergit.composer.tracked_files", return_value=["ghost.c"]):
+            disabled_json = reports.explain_json(
+                self.root,
+                "ghost.c",
+                {"workspace": {"output": "./out"}, "layers": [{"name": "disabled", "enabled": False}]},
+            )
+        self.assertEqual(disabled_json["disabled_providers"][0]["sourcePath"], "ghost.c")
+        self.assertEqual(reports.explain_file(self.root, "none.c", {"workspace": {"output": "./out"}, "layers": []}), None)
+        self.assertEqual(reports.explain_json(self.root, "none.c", {"workspace": {"output": "./out"}, "layers": []}), None)
+        self.assertIn("No ownership record", reports.format_explain("none.c", None))
+        self.assertIn(
+            "stale owned file",
+            reports.format_explain(
+                "stale.c",
+                {"unowned": True, "stale_owned": True, "visible": None, "masked": [], "reason": "stale"},
+            ),
+        )
+        self.assertIn(
+            "untracked buildtree file",
+            reports.format_explain(
+                "new.c",
+                {"unowned": True, "untracked": True, "visible": None, "masked": [], "reason": "new"},
+            ),
+        )
+        self.assertIn(
+            "Hidden providers",
+            reports.format_explain(
+                "hidden.c",
+                {
+                    "visible": None,
+                    "selected_layer": "base",
+                    "hidden": True,
+                    "masked": [{"layer": "top", "source_path": "hidden.c"}],
+                    "reason": "hidden",
+                },
+            ),
+        )
+        self.assertIn(
+            "Masked lower-layer files",
+            reports.format_explain(
+                "visible.c",
+                {
+                    "visible": {"layer": "top", "repo": None, "commit": "abc", "source_path": "visible.c"},
+                    "masked": [{"layer": "base", "source_path": "visible.c"}],
+                    "reason": "top wins",
+                },
+            ),
+        )
+        reports.add_extension_fields({"layer": "a", "source_path": "a.c", "commit": "abc"}, {"a": 1})
+
+    def test_worktree_edge_cases_and_dry_run(self) -> None:
+        output = self.root / "out"
+        output.mkdir()
+        with self.assertRaisesRegex(LayerError, "Invalid buildtree path"):
+            worktree.normalize_buildtree_path("../bad", self.root, output)
+        with self.assertRaisesRegex(LayerError, "not inside"):
+            worktree.normalize_buildtree_path(str(self.root / "other.txt"), self.root, output)
+        self.assertEqual(worktree.normalize_buildtree_path("out/a.c", self.root, output), "a.c")
+        self.assertEqual(worktree.display_path(self.root, Path("/tmp/outside-layergit-test")), "/tmp/outside-layergit-test")
+
+        source = output / "new.c"
+        source.write_text("new\n")
+        item = {
+            "path": "new.c",
+            "write_layer": "local",
+            "buildtree_path": "out/new.c",
+            "layer_path": ".layer/cache/local/new.c",
+        }
+        result = worktree.apply_buildtree_changes(
+            self.root,
+            {"workspace": {"write_layer": "local"}},
+            {"modified": [], "new": [item], "deleted": []},
+            dry_run=True,
+        )
+        self.assertEqual(result["new"], [item])
+        self.assertFalse((self.root / ".layer" / "cache" / "local" / "new.c").exists())
+
+        ownership_file = self.root / ".layer" / "ownership.json"
+        ownership_file.parent.mkdir(parents=True)
+        ownership_file.write_text(
+            json.dumps(
+                {
+                    "skip-hidden.c": {"visible": None},
+                    "skip-owner.c": {"visible": {"source_path": "skip-owner.c"}},
+                    "owned.c": {"visible": {"layer": "owner", "source_path": "owned.c"}},
+                    "stale.c": {"visible": {"layer": "old", "source_path": "stale.c"}},
+                }
+            )
+        )
+        owner_cache = gitops.layer_cache_path(self.root, "owner")
+        owner_cache.mkdir(parents=True)
+        (owner_cache / "owned.c").write_text("old\n")
+        (output / "owned.c").write_text("new\n")
+        (output / "skip-hidden.c").write_text("hidden\n")
+        (output / "skip-owner.c").write_text("ownerless\n")
+        (output / "stale.c").write_text("stale\n")
+        (output / "untracked.c").write_text("new\n")
+        diff = worktree.buildtree_diff(
+            self.root,
+            {"workspace": {"output": "./out", "write_layer": "local"}, "layers": [{"name": "owner"}]},
+            path="missing.c",
+        )
+        self.assertEqual(diff["modified"], [])
+        diff = worktree.buildtree_diff(
+            self.root,
+            {"workspace": {"output": "./out", "write_layer": "local"}, "layers": [{"name": "owner"}]},
+            layer="other",
+        )
+        self.assertEqual(diff["modified"], [])
+        self.assertEqual(diff["new"], [])
+        diff = worktree.buildtree_diff(
+            self.root,
+            {"workspace": {"output": "./out", "write_layer": "local"}, "layers": [{"name": "owner"}]},
+        )
+        self.assertEqual(diff["modified"][0]["path"], "owned.c")
+        self.assertIn("stale.c", {item["path"] for item in diff["stale"]})
+        with patch(
+            "layergit.worktree.current_ownership",
+            return_value={
+                "hidden.c": {"visible": None},
+                "ownerless.c": {"visible": {"source_path": "ownerless.c"}},
+            },
+        ):
+            malformed = worktree.buildtree_diff(
+                self.root,
+                {"workspace": {"output": "./out"}, "layers": [{"name": "owner"}]},
+            )
+        self.assertEqual(malformed["modified"], [])
+        blocked = gitops.layer_cache_path(self.root, "owner") / "blocked"
+        blocked.mkdir()
+        (blocked / "child.txt").write_text("child\n")
+        worktree.remove_empty_parents(blocked, gitops.layer_cache_path(self.root, "owner"))
+        self.assertTrue(blocked.exists())
+
+    def test_merger_and_exporter_branches(self) -> None:
+        with self.assertRaisesRegex(LayerError, "No layers selected"):
+            merger.merge_layers(self.root, {"layers": []}, [], "merged")
+        with self.assertRaisesRegex(LayerError, "already exists"):
+            merger.merge_layers(self.root, {"layers": [{"name": "merged"}]}, [0], "merged")
+
+        manifest_data = {"layers": [{"name": "a"}, {"name": "b"}], "conflicts": {"duplicate_basename_policy": "warn"}}
+        merge_tmp = self.root / ".layer" / "merge-tmp" / "merged"
+        merge_tmp.mkdir(parents=True)
+        (merge_tmp / "file.c").write_text("merged\n")
+        (self.root / ".layer").mkdir(exist_ok=True)
+        (self.root / ".layer" / "ownership.json").write_text("{}\n")
+        existing_target = gitops.layer_cache_path(self.root, "merged")
+        existing_target.mkdir(parents=True)
+        (existing_target / "old.c").write_text("old\n")
+        with patch("layergit.merger.compose", return_value={"conflicts": []}), patch(
+            "layergit.merger.init_repo_with_commit"
+        ) as init_repo:
+            result = merger.merge_layers(self.root, manifest_data, [0, 1], "merged", init_git=True, with_provenance=True)
+        self.assertEqual(result["layers"][0]["name"], "merged")
+        self.assertTrue((gitops.layer_cache_path(self.root, "merged") / ".layer-provenance.json").exists())
+        init_repo.assert_called_once()
+
+        with patch("layergit.merger.compose", return_value={"conflicts": [{"path": "x"}]}):
+            with self.assertRaisesRegex(LayerError, "conflicts"):
+                merger.merge_layers(self.root, {"layers": [{"name": "a"}]}, [0], "out")
+
+        out = self.root / "out"
+        out.mkdir()
+        (out / "file.c").write_text("file\n")
+        (self.root / "layer.lock.yaml").write_text("layers: []\n")
+        destination = self.root / "export"
+        destination.mkdir()
+        (destination / "old.c").write_text("old\n")
+        with patch("layergit.exporter.compose", return_value={"conflicts": []}), patch(
+            "layergit.exporter.init_repo_with_commit"
+        ) as init_repo:
+            exporter.export_workspace(
+                self.root,
+                {"workspace": {"output": "./out"}},
+                destination,
+                init_git=True,
+                with_provenance=True,
+            )
+        self.assertTrue((destination / "file.c").exists())
+        self.assertTrue((destination / ".layer-lock.yaml").exists())
+        init_repo.assert_called_once()
+
+        with patch("layergit.exporter.compose", return_value={"conflicts": [{"path": "x"}]}):
+            with self.assertRaisesRegex(LayerError, "conflicts"):
+                exporter.export_workspace(self.root, {"workspace": {"output": "./out"}}, self.root / "bad")
+
+    def test_manifest_and_cli_helpers(self) -> None:
+        with self.assertRaisesRegex(LayerError, "No layer.yaml"):
+            manifest.load_manifest(self.root)
+        self.assertIsNone(cli.gitignore_output_entry(self.root, "/outside"))
+        self.assertIsNone(cli.gitignore_output_entry(self.root, "."))
+        self.assertEqual(cli.infer_layer_name("git@example.com:Team/My Repo.git", []), "my-repo")
+        self.assertEqual(cli.unique_layer_name("layer", [{"name": "layer"}, {"name": "layer-2"}]), "layer-3")
+        self.assertEqual(cli.invalid_command(["--version"]), None)
+        self.assertEqual(cli.invalid_command(["-L", "a", "status"]), None)
+        self.assertEqual(cli.invalid_command(["-L", "a"]), None)
+        self.assertEqual(cli.infer_layer_name("git@example.com:repo.git", []), "repo")
+        existing_gitignore = self.root / ".gitignore"
+        existing_gitignore.write_text("# BEGIN LayerGit\nold\n# END LayerGit\n")
+        cli.ensure_gitignore(self.root, "./out")
+        self.assertIn("/out/", existing_gitignore.read_text())
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.cmd_help("layer", []), 0)
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(cli.cmd_help("layer", ["help"]), 1)
+
+    def test_cli_formatter_and_cmd_add_helper_edges(self) -> None:
+        manifest_data = {
+            "workspace": {"output": "./out"},
+            "composition": {"same_path_policy": "top_wins"},
+            "layers": [{"name": "repo-a", "repo": "/tmp/repo-a", "enabled": True}],
+            "conflicts": {"duplicate_basename_policy": "warn"},
+        }
+        manifest.save_manifest(self.root, manifest_data)
+        args = cli.argparse.Namespace(
+            local=False,
+            repo="/tmp/repo-a",
+            name=None,
+            revision=None,
+            before=None,
+            after=None,
+            top=False,
+            no_sync=True,
+            no_compose=True,
+        )
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.cmd_add(self.root, args), 0)
+        self.assertIn("repo-a-2", stdout.getvalue())
+
+        diff_text = cli.format_buildtree_diff(
+            {
+                "modified": [{"path": "a.c", "layer": "base"}],
+                "new": [{"path": "b.c", "write_layer": "local"}],
+                "deleted": [],
+                "stale": [],
+            }
+        )
+        self.assertIn("\n\nNew:", diff_text)
+        self.assertIn("b.c -> write layer local", diff_text)
+
+        apply_text = cli.format_apply_result(
+            {
+                "modified": [{"path": "a.c", "layer": "base"}],
+                "new": [{"path": "b.c", "write_layer": "local"}],
+                "deleted": [],
+                "skipped_deleted": [],
+            },
+            dry_run=True,
+        )
+        self.assertIn("\n\nWould apply new:", apply_text)
+
+
+if __name__ == "__main__":
+    unittest.main()

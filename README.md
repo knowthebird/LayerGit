@@ -348,6 +348,22 @@ Run Python tests without external test dependencies:
 PYTHONDONTWRITEBYTECODE=1 python -m unittest
 ```
 
+Run Python coverage for the CLI and child LayerGit processes:
+
+```bash
+python -m pip install -e '.[dev]'
+coverage erase
+LAYERGIT_TEST_COVERAGE=1 coverage run --parallel-mode -m unittest
+coverage combine
+coverage report
+coverage report --format=markdown > tests/coverage-summary.md
+```
+
+`LAYERGIT_TEST_COVERAGE=1` tells the test harness to run each spawned
+`python -m layergit.cli` subprocess under `coverage run --parallel-mode`, so the
+reported numbers include the actual CLI code paths. The checked-in snapshot is
+saved at `tests/coverage-summary.md`.
+
 Compile the VS Code extension:
 
 ```bash

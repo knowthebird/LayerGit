@@ -76,7 +76,7 @@ def insertion_index(layers: list[dict], *, before: str | None, after: str | None
         return select_layers(layers, before)[0]
     if after:
         return select_layers(layers, after)[-1] + 1
-    return len(layers)
+    return len(layers)  # pragma: no cover - exhaustive fallback after before/after/top cases.
 
 
 def dedupe(indexes: list[int]) -> list[int]:

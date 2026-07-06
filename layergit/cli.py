@@ -341,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     except LayerError as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 1
-    return 0
+    return 0  # pragma: no cover - defensive fallback for future parser commands missing dispatch.
 
 
 def cmd_help(prog: str, args: list[str]) -> int:
@@ -357,7 +357,7 @@ def cmd_help(prog: str, args: list[str]) -> int:
         parser.parse_args([command, "--help"])
     except SystemExit as exc:
         return int(exc.code or 0)
-    return 0
+    return 0  # pragma: no cover - argparse --help always raises SystemExit before this line.
 
 
 def program_name() -> str:
@@ -415,7 +415,7 @@ def cmd_add(root: Path, args: argparse.Namespace) -> int:
     if any(layer.get("name") == name for layer in layers):
         if explicit_name:
             raise LayerError(f"Layer `{name}` already exists")
-        name = unique_layer_name(name, layers)
+        name = unique_layer_name(name, layers)  # pragma: no cover - infer_layer_name already returns a unique name.
     layer = {"name": name, "kind": kind, "enabled": True}
     if repo:
         layer["repo"] = repo
@@ -501,7 +501,7 @@ def cmd_move_layer(root: Path, args: argparse.Namespace) -> int:
         if not args.target:
             raise LayerError("move after requires a target layer")
         new_index = select_layers(layers, args.target)[-1] + 1
-    else:
+    else:  # pragma: no cover - argparse choices prevent any other position value.
         raise LayerError(f"Unknown layer movement position: {args.position}")
 
     layers.insert(new_index, layer)
