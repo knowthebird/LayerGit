@@ -159,14 +159,29 @@ and export.
 - `layer.yaml` is the workspace recipe.
 - `.layer/cache/<layer>/` contains isolated normal Git repos.
 - `buildtree/` is generated output for IDEs and build tools.
+- Each layer has an optional `mount` path.
+- By default, layers mount at `/`, so they can overlap at the buildtree root.
+- Layers can also mount under subfolders such as `/app`, `/docs`, or
+  `/third_party/vendor`.
+- Overlaps are resolved after mount mapping.
+- LayerGit does not currently support mapping only a subdirectory of a source
+  repo. If you need selective visibility, use normal layer precedence, masking,
+  `layer use`, or a separate layer.
 - Higher layers win path conflicts by default.
 - Masked files are not deleted.
 - `layer explain` shows visible and masked provenance.
-- `layer use` selects a different provider for one path.
+- `layer use` selects a different existing provider for one path.
+- `layer use <path> <layer>` fails if the target layer does not provide the
+  file, so hidden files are always intentional.
+- `layer use <path> <layer> --hide` assigns a path to a non-provider layer and
+  hides lower providers from `buildtree/`.
+- `layer adopt <path> <layer>` copies the current `buildtree/` file into a
+  layer cache, assigns that path to the layer, and stages the file if it is new
+  to that layer.
 - `layer overlaps` shows paths provided by more than one enabled layer.
 - `layer diff` shows generated-tree edits that can be applied.
-- `layer apply` copies edits from `buildtree/` back to the intended layer repo.
-- Git still handles add, commit, push, branch, and merge.
+- `layer apply` copies edits from `buildtree/` back to the intended layer repo, stages newly added files so they become normal layer providers.
+- Git still handles commit, push, branch, and merge.
 
 LayerGit writes supporting metadata:
 
@@ -183,9 +198,13 @@ LayerGit writes supporting metadata:
 | `layer explain <path>`        | Show which layer provides a file                     |
 | `layer overlaps`              | Show paths provided by more than one enabled layer   |
 | `layer use <path> <layer>`    | Choose a specific layer for one path                 |
+| `layer use <path> <layer> --hide` | Hide inherited providers for one path            |
+| `layer adopt <path> <layer>`  | Copy a buildtree file into a layer and stage it if new |
 | `layer diff`                  | Show `buildtree/` changes that can be applied        |
 | `layer apply <path>`          | Apply one edited file back to its owning layer       |
+| `layer apply <path> --stage`  | Apply and stage an edited tracked file               |
 | `layer apply --new`           | Apply new unowned files to the write layer           |
+| `layer apply --new --no-stage` | Apply new files without staging them                |
 | `layer -L <layer> git status` | Run Git inside a layer cache repo                    |
 
 Common examples:
@@ -194,6 +213,8 @@ Common examples:
 layer explain common/util.c
 layer overlaps
 layer use common/util.c component-b
+layer use common/util.c board-support --hide
+layer adopt common/util.c board-support
 layer diff common/util.c
 layer apply common/util.c
 layer -L component-b git status
@@ -208,6 +229,58 @@ layer -L workspace-base git status
 ```
 
 ## Advanced Features
+
+### Layer mount paths
+
+By default, layers compose at the root of `buildtree/`. You can mount a whole
+layer under a subfolder:
+
+```bash
+layer add ../app app --mount /app
+layer add ../docs docs --mount /docs
+```
+
+This lets a workspace mix overlapping layers and isolated subtrees. The mount
+maps the entire source repo root to that buildtree path; it does not select a
+source subdirectory.
+
+### Hiding inherited files with `layer use --hide`
+
+Plain `layer use <path> <layer>` only selects a layer that already provides the
+file. To intentionally hide lower providers, pass `--hide`:
+
+```bash
+layer use common/util.c board-support --hide
+```
+
+If `board-support` does not provide `common/util.c`, LayerGit hides the file
+from `buildtree/` and records the lower providers as masked by the assignment.
+
+This is useful when a higher layer should intentionally suppress a file
+inherited from a lower layer.
+
+Use:
+
+```bash
+layer unuse common/util.c
+```
+
+to return to normal top-layer-wins behavior.
+
+### Adopting a buildtree file into a layer
+
+Use `layer adopt` when the current `buildtree/` file should become the selected
+layer's copy:
+
+```bash
+layer adopt common/util.c board-support
+```
+
+LayerGit copies the file into `.layer/cache/board-support/` and updates
+`layer.yaml`. If the file is new to that layer, LayerGit stages it by default
+so Git treats it as a normal provider. Use `--no-stage` to leave it untracked.
+For mounted layers, the destination source path is derived from the mount. A
+file outside the target layer's mount is rejected.
 
 ### Local layers and write layer
 
@@ -284,11 +357,12 @@ commands from the workspace root:
 
 ```bash
 layer -L component-b git status
-layer -L component-b git add common/util.c
 layer -L component-b git commit -m "Fix shared utility"
 ```
 
-Do not commit from `buildtree/`; it is generated output. Use `layer apply` first.
+Do not commit from `buildtree/`; it is generated output. Use `layer apply`
+first. New files copied by `layer apply` are staged automatically; modified
+tracked files remain normal Git modifications.
 
 ## VS Code Extension
 

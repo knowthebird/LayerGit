@@ -7,7 +7,7 @@ from typing import Any
 
 from .composer import file_providers
 from .gitops import current_branch, current_commit, layer_cache_path, porcelain_status
-from .manifest import conflicts_path, output_path, ownership_path
+from .manifest import conflicts_path, output_path, ownership_path, source_path_for_buildtree
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -40,6 +40,7 @@ def workspace_status(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 "name": layer["name"],
                 "kind": layer.get("kind", "git"),
                 "repo": layer.get("repo"),
+                "mount": layer.get("mount", "/"),
                 "enabled": layer.get("enabled", True),
                 "position": layer_position(index, enabled_indexes),
                 "status": status,
@@ -117,13 +118,19 @@ def composed_tree(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 "ownership": "composed",
                 "visibleLayer": visible_layer,
                 "visibleLayerIndex": layer_indexes.get(visible_layer),
+                "sourcePath": visible.get("source_path"),
+                "source_path": visible.get("source_path"),
+                "mount": visible.get("mount"),
                 "selectedLayer": entry.get("selected_layer"),
+                "selectedMount": entry.get("selected_mount"),
                 "hidden": bool(entry.get("hidden")),
+                "reason": entry.get("reason"),
                 "maskedByThisFile": [
                     item.get("layer")
                     for item in entry.get("masked", [])
                     if item.get("layer")
                 ],
+                "maskedProviders": entry.get("masked", []),
             }
         )
     for rel_path in buildtree["stale_owned"]:
@@ -135,9 +142,15 @@ def composed_tree(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 "ownership": "stale",
                 "visibleLayer": None,
                 "visibleLayerIndex": None,
+                "sourcePath": None,
+                "source_path": None,
+                "mount": None,
                 "selectedLayer": None,
+                "selectedMount": None,
                 "hidden": False,
+                "reason": None,
                 "maskedByThisFile": [],
+                "maskedProviders": [],
             }
         )
     for rel_path in buildtree["untracked"]:
@@ -149,9 +162,15 @@ def composed_tree(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 "ownership": "untracked",
                 "visibleLayer": None,
                 "visibleLayerIndex": None,
+                "sourcePath": None,
+                "source_path": None,
+                "mount": None,
                 "selectedLayer": None,
+                "selectedMount": None,
                 "hidden": False,
+                "reason": None,
                 "maskedByThisFile": [],
+                "maskedProviders": [],
             }
         )
     files.sort(key=lambda item: item["path"])
@@ -172,12 +191,15 @@ def overlap_report(root: Path, manifest: dict[str, Any], rel_path: str | None = 
             continue
         visible = entry.get("visible")
         masked = entry.get("masked", [])
-        if not visible or not masked:
+        if not masked:
+            continue
+        if not visible and not entry.get("hidden"):
             continue
         overlaps.append(
             {
                 "path": path,
                 "visible": visible,
+                "selected_layer": entry.get("selected_layer"),
                 "masked": masked,
                 "reason": overlap_reason(entry.get("reason")),
             }
@@ -212,11 +234,13 @@ def format_overlaps(data: dict[str, Any], rel_path: str | None = None) -> str:
         visible = entry.get("visible") or {}
         masked = entry.get("masked", [])
         masked_layers = ", ".join(item.get("layer", "-") for item in masked)
+        visible_layer = visible.get("layer") if visible else "<hidden>"
         lines.extend(
             [
                 "",
                 entry["path"],
-                f"  visible: {visible.get('layer', '-')}",
+                f"  visible: {visible_layer}",
+                *([f"  assigned layer: {entry.get('selected_layer')}"] if entry.get("selected_layer") else []),
                 f"  masked:  {masked_layers or '-'}",
                 f"  reason:  {entry.get('reason') or '-'}",
             ]
@@ -312,9 +336,10 @@ def buildtree_state(
 ) -> dict[str, list[str]]:
     output_files = set(iter_output_files(output_path(root, manifest)))
     current_visible = visible_output_paths(ownership)
-    previously_owned = visible_output_paths(raw_ownership)
-    stale_owned = sorted((previously_owned - current_visible) & output_files)
-    untracked = sorted(output_files - previously_owned)
+    previously_visible = visible_output_paths(raw_ownership)
+    previously_logical = logical_output_paths(raw_ownership)
+    stale_owned = sorted((previously_visible - current_visible) & output_files)
+    untracked = sorted(output_files - previously_logical)
     return {"untracked": untracked, "stale_owned": stale_owned}
 
 
@@ -336,6 +361,14 @@ def visible_output_paths(ownership: dict[str, Any]) -> set[str]:
     }
 
 
+def logical_output_paths(ownership: dict[str, Any]) -> set[str]:
+    return {
+        rel_path
+        for rel_path, entry in ownership.items()
+        if entry.get("visible") is not None or entry.get("hidden")
+    }
+
+
 def format_status_short(status: dict[str, Any]) -> str:
     lines = ["Layers:"]
     if not status["layers"]:
@@ -347,8 +380,9 @@ def format_status_short(status: dict[str, Any]) -> str:
         enabled = "enabled" if layer.get("enabled") else "disabled"
         kind = layer.get("kind", "git")
         write = "  write" if status.get("write_layer") == layer.get("name") else ""
+        mount = layer.get("mount", "/")
         lines.append(
-            f"  {layer['index']} {layer['name']:<16} {kind:<5} {enabled:<8} {layer['status']:<9} {branch} @ {commit}{suffix}{write}"
+            f"  {layer['index']} {layer['name']:<16} {kind:<5} {mount:<12} {enabled:<8} {layer['status']:<9} {branch} @ {commit}{suffix}{write}"
         )
     if status.get("write_layer"):
         lines.extend(["", f"Write layer: {status['write_layer']}"])
@@ -423,7 +457,7 @@ def format_status(status: dict[str, Any]) -> str:
         lines.append("  <none>")
     else:
         layers = list(reversed(status["layers"]))
-        headers = ["ORDER", "NAME", "TYPE", "STATE", "GIT", "BRANCH", "COMMIT", "FLAGS"]
+        headers = ["ORDER", "NAME", "TYPE", "MOUNT", "STATE", "GIT", "BRANCH", "COMMIT", "FLAGS"]
         enabled_count = sum(1 for layer in status["layers"] if layer.get("enabled"))
         rows = [status_layer_row(layer, status.get("write_layer"), enabled_count) for layer in layers]
         widths = [
@@ -507,6 +541,7 @@ def status_layer_row(layer: dict[str, Any], write_layer: str | None, enabled_cou
         str(layer["index"]),
         layer["name"],
         layer.get("kind", "git"),
+        layer.get("mount", "/"),
         enabled,
         status_git_label(layer.get("status")),
         branch,
@@ -560,11 +595,21 @@ def explain_file(root: Path, rel_path: str, manifest: dict[str, Any] | None = No
         "visible": None,
         "masked": [],
         "disabled_providers": [
-            {"layer": provider, "source_path": rel_path}
+            disabled_provider_entry(manifest, rel_path, provider)
             for provider in disabled_providers
         ],
         "reason": "disabled layer providers are not included in composition",
     }
+
+
+def disabled_provider_entry(manifest: dict[str, Any], rel_path: str, layer_name: str) -> dict[str, Any]:
+    layer = next(
+        (item for item in manifest.get("layers", []) if item.get("name") == layer_name),
+        {},
+    )
+    mount = layer.get("mount", "/")
+    source_path = source_path_for_buildtree(rel_path, mount) or rel_path
+    return {"layer": layer_name, "source_path": source_path, "mount": mount, "path": rel_path}
 
 
 def explain_json(root: Path, rel_path: str, manifest: dict[str, Any]) -> dict[str, Any] | None:
@@ -614,6 +659,19 @@ def format_explain(rel_path: str, entry: dict[str, Any] | None) -> str:
         return "\n".join(lines)
     if entry.get("visible") is None:
         selected_layer = entry.get("selected_layer")
+        if entry.get("hidden"):
+            lines = [
+                rel_path,
+                "",
+                "Hidden by selection",
+                f"  assigned layer: {selected_layer or '-'}",
+            ]
+            if entry.get("reason"):
+                lines.append(f"  reason: {entry['reason']}")
+            lines.extend(["", "Masked providers:"])
+            for item in entry.get("masked", []):
+                lines.append(f"  {item.get('layer')}/{item.get('source_path')} (mount {item.get('mount', '/')})")
+            return "\n".join(lines)
         lines = [
             rel_path,
             "",
@@ -622,14 +680,14 @@ def format_explain(rel_path: str, entry: dict[str, Any] | None) -> str:
         ]
         if selected_layer:
             lines.extend(["", "Selected layer:", f"  {selected_layer}"])
-        if entry.get("hidden"):
-            lines.extend(["", "Hidden providers:"])
-            for item in entry.get("masked", []):
-                lines.append(f"  {item.get('layer')}/{item.get('source_path')}")
-        else:
+        if entry.get("disabled_providers"):
             lines.extend(["", "Disabled providers:"])
             for item in entry.get("disabled_providers", []):
-                lines.append(f"  {item.get('layer')}/{item.get('source_path')}")
+                lines.append(f"  {item.get('layer')}/{item.get('source_path')} (mount {item.get('mount', '/')})")
+        else:
+            lines.extend(["", "Masked providers:"])
+            for item in entry.get("masked", []):
+                lines.append(f"  {item.get('layer')}/{item.get('source_path')} (mount {item.get('mount', '/')})")
         if entry.get("reason"):
             lines.extend(["", "Reason:", f"  {entry['reason']}"])
         return "\n".join(lines)
@@ -642,12 +700,13 @@ def format_explain(rel_path: str, entry: dict[str, Any] | None) -> str:
         f"  repo: {visible.get('repo')}",
         f"  commit: {visible.get('commit')}",
         f"  source path: {visible.get('source_path')}",
+        f"  mount: {visible.get('mount', '/')}",
     ]
     masked = entry.get("masked", [])
     if masked:
         lines.extend(["", "Masked lower-layer files:"])
         for item in masked:
-            lines.append(f"  {item.get('layer')}/{item.get('source_path')}")
+            lines.append(f"  {item.get('layer')}/{item.get('source_path')} (mount {item.get('mount', '/')})")
     if entry.get("reason"):
         lines.extend(["", "Reason:", f"  {entry['reason']}"])
     return "\n".join(lines)

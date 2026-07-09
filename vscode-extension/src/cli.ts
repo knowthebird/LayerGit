@@ -20,6 +20,10 @@ export class LayerGitCli {
     this.output.show(true);
   }
 
+  showOutput(): void {
+    this.output.show(true);
+  }
+
   async status(workspace: vscode.Uri): Promise<LayerGitStatus> {
     return this.runJson<LayerGitStatus>(workspace, ['status', '--json']);
   }

@@ -22,8 +22,13 @@
     "onView:layergit.composedTree",
     "onCommand:layergit.refresh",
     "onCommand:layergit.init",
+    "onCommand:layergit.addLayer",
     "onCommand:layergit.addLocalLayer",
+    "onCommand:layergit.compose",
+    "onCommand:layergit.openOutput",
+    "onCommand:layergit.applyAll",
     "onCommand:layergit.setWriteLayer",
+    "onCommand:layergit.clearSelection",
     "onCommand:layergit.explainCurrentFile"
   ],
   "main": "./out/extension.js",
@@ -70,12 +75,22 @@
         "title": "LayerGit: Initialize Workspace"
       },
       {
+        "command": "layergit.openOutput",
+        "title": "LayerGit: Open Output",
+        "icon": "$(output)"
+      },
+      {
+        "command": "layergit.compose",
+        "title": "LayerGit: Compose / Refresh Tree",
+        "icon": "$(sync)"
+      },
+      {
         "command": "layergit.pullAll",
         "title": "LayerGit: Pull All Layers"
       },
       {
         "command": "layergit.addLayer",
-        "title": "LayerGit: Add Repo Layer",
+        "title": "LayerGit: Add Layer...",
         "icon": "$(add)"
       },
       {
@@ -92,6 +107,23 @@
         "command": "layergit.setWriteLayer",
         "title": "LayerGit: Set Write Layer",
         "icon": "$(edit)"
+      },
+      {
+        "command": "layergit.openLayerCache",
+        "title": "LayerGit: Open Layer Cache Repo"
+      },
+      {
+        "command": "layergit.gitStatusLayer",
+        "title": "LayerGit: Git Status for Layer"
+      },
+      {
+        "command": "layergit.applyLayer",
+        "title": "LayerGit: Apply Changes for Layer"
+      },
+      {
+        "command": "layergit.applyAll",
+        "title": "LayerGit: Apply All Changes",
+        "icon": "$(check)"
       },
       {
         "command": "layergit.explainCurrentFile",
@@ -134,6 +166,14 @@
         "title": "LayerGit: Use Layer for Folder Recursively"
       },
       {
+        "command": "layergit.applyFile",
+        "title": "LayerGit: Apply File"
+      },
+      {
+        "command": "layergit.clearSelection",
+        "title": "LayerGit: Clear Selection"
+      },
+      {
         "command": "layergit.openManifest",
         "title": "LayerGit: Open Manifest"
       }
@@ -142,27 +182,32 @@
       "view/title": [
         {
           "command": "layergit.refresh",
-          "when": "view == layergit.layers || view == layergit.composedTree",
+          "when": "(view == layergit.layers || view == layergit.composedTree) && layergit.workspaceFound",
           "group": "navigation"
         },
         {
           "command": "layergit.init",
-          "when": "view == layergit.layers",
+          "when": "view == layergit.layers && !layergit.workspaceFound",
           "group": "navigation"
         },
         {
           "command": "layergit.addLayer",
-          "when": "view == layergit.layers",
+          "when": "view == layergit.layers && layergit.workspaceFound",
           "group": "navigation"
         },
         {
-          "command": "layergit.addLocalLayer",
-          "when": "view == layergit.layers",
+          "command": "layergit.compose",
+          "when": "view == layergit.composedTree && layergit.workspaceFound",
           "group": "navigation"
         },
         {
-          "command": "layergit.removeLayer",
-          "when": "view == layergit.layers",
+          "command": "layergit.applyAll",
+          "when": "(view == layergit.layers || view == layergit.composedTree) && layergit.workspaceFound",
+          "group": "navigation"
+        },
+        {
+          "command": "layergit.openOutput",
+          "when": "(view == layergit.layers || view == layergit.composedTree) && layergit.workspaceFound",
           "group": "navigation"
         }
       ],
@@ -188,6 +233,11 @@
           "group": "write"
         },
         {
+          "command": "layergit.applyLayer",
+          "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
+          "group": "apply"
+        },
+        {
           "command": "layergit.moveLayerUp",
           "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
           "group": "movement"
@@ -208,12 +258,37 @@
           "group": "movement"
         },
         {
+          "command": "layergit.openLayerCache",
+          "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
+          "group": "repo"
+        },
+        {
+          "command": "layergit.gitStatusLayer",
+          "when": "view == layergit.layers && viewItem =~ /layergit\\.layer\\./",
+          "group": "repo"
+        },
+        {
+          "command": "layergit.init",
+          "when": "view == layergit.layers && viewItem == layergit.action.initialize",
+          "group": "inline"
+        },
+        {
           "command": "layergit.explainFile",
           "when": "view == layergit.composedTree && viewItem == layergit.file",
           "group": "inline"
         },
         {
           "command": "layergit.useLayerForFile",
+          "when": "view == layergit.composedTree && viewItem == layergit.file",
+          "group": "precedence"
+        },
+        {
+          "command": "layergit.applyFile",
+          "when": "view == layergit.composedTree && viewItem == layergit.file",
+          "group": "apply"
+        },
+        {
+          "command": "layergit.clearSelection",
           "when": "view == layergit.composedTree && viewItem == layergit.file",
           "group": "precedence"
         },

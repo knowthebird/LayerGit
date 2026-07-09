@@ -5,6 +5,12 @@ export interface LayerGitStatus {
   layers: LayerInfo[];
   conflicts: unknown[];
   warnings: unknown[];
+  modified_files?: ModifiedFile[];
+}
+
+export interface ModifiedFile {
+  path: string;
+  layer?: string | null;
 }
 
 export interface LayerInfo {
@@ -12,6 +18,7 @@ export interface LayerInfo {
   name: string;
   kind?: 'git' | 'local';
   repo?: string;
+  mount?: string;
   enabled: boolean;
   position?: 'top' | 'bottom' | null;
   branch?: string | null;
@@ -35,9 +42,15 @@ export interface TreeFile {
   ownership?: 'composed' | 'stale' | 'untracked';
   visibleLayer?: string;
   visibleLayerIndex?: number;
+  sourcePath?: string | null;
+  source_path?: string | null;
+  mount?: string | null;
   selectedLayer?: string;
+  selectedMount?: string | null;
   hidden?: boolean;
+  reason?: string | null;
   maskedByThisFile: string[];
+  maskedProviders?: ExplainProvider[];
 }
 
 export interface ExplainResult {
@@ -55,6 +68,7 @@ export interface ExplainProvider {
   layerIndex?: number;
   source_path?: string;
   sourcePath?: string;
+  mount?: string;
   commit?: string;
   revision?: string;
 }

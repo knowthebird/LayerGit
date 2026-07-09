@@ -2,9 +2,9 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { LayerGitCli } from './cli';
 import { TreeFile } from './models';
-import { findLayerGitWorkspace } from './workspace';
+import { exists, findLayerGitWorkspace } from './workspace';
 
-type Node = DirectoryNode | FileNode | EmptyNode;
+type Node = DirectoryNode | FileNode | MessageNode | ActionNode | SectionNode;
 
 export class ComposedTreeProvider implements vscode.TreeDataProvider<Node> {
   private readonly changed = new vscode.EventEmitter<Node | undefined>();
@@ -32,15 +32,44 @@ export class ComposedTreeProvider implements vscode.TreeDataProvider<Node> {
 
     const workspace = await findLayerGitWorkspace();
     if (!workspace) {
-      return [new EmptyNode('No LayerGit workspace found')];
+      return [
+        new MessageNode(
+          'No LayerGit workspace found',
+          'Initialize a workspace from the Layers view.'
+        ),
+      ];
     }
 
     try {
       const tree = await this.cli.tree(workspace);
       this.roots = buildTree(workspace, tree.output, tree.files);
-      return this.roots.length ? this.roots : [new EmptyNode('Composed tree is empty')];
+      const stale = tree.files.some((file) => file.ownership === 'stale');
+      const actions = [
+        new ActionNode('Compose / Refresh Tree', 'layergit.compose', 'sync'),
+        new ActionNode('Apply All Changes', 'layergit.applyAll', 'check'),
+      ];
+      if (!this.roots.length) {
+        const outputExists = await exists(outputUri(workspace, tree.output));
+        return outputExists
+          ? [...actions, new MessageNode('Composed tree is empty')]
+          : [
+              new MessageNode(
+                'No composed tree found',
+                `Run layer compose to generate ${tree.output || 'buildtree/'}.`
+              ),
+              actions[0],
+            ];
+      }
+      return stale
+        ? [
+            new MessageNode('Generated state may be stale', 'Run layer compose.', 'warning'),
+            ...actions,
+            new SectionNode('---------------- Files ----------------'),
+            ...this.roots,
+          ]
+        : [...actions, new SectionNode('---------------- Files ----------------'), ...this.roots];
     } catch (error) {
-      return [new EmptyNode(error instanceof Error ? error.message : String(error))];
+      return [new MessageNode(error instanceof Error ? error.message : String(error), undefined, 'error')];
     }
   }
 }
@@ -91,11 +120,13 @@ export class FileNode extends vscode.TreeItem {
     this.iconPath = new vscode.ThemeIcon(fileIcon(file));
     const owner = fileTooltipOwner(file);
     this.tooltip = `${file.path}\n${owner}`;
-    this.command = {
-      command: 'vscode.open',
-      title: 'Open File',
-      arguments: [this.uri, { preview: true }],
-    };
+    if (!file.hidden) {
+      this.command = {
+        command: 'vscode.open',
+        title: 'Open File',
+        arguments: [this.uri, { preview: true }],
+      };
+    }
   }
 
   get uri(): vscode.Uri {
@@ -131,16 +162,39 @@ function fileTooltipOwner(file: TreeFile): string {
     return 'not owned by any layer';
   }
   return file.hidden
-    ? `hidden by selected layer: ${file.selectedLayer ?? 'unknown'}`
+    ? `hidden by selection\nassigned layer: ${file.selectedLayer ?? 'unknown'}\n${file.reason ?? ''}`
     : `visible from: ${file.visibleLayer ?? 'unknown'}`;
 }
 
-class EmptyNode extends vscode.TreeItem {
-  constructor(message: string) {
+class MessageNode extends vscode.TreeItem {
+  constructor(message: string, detail?: string, icon = 'info') {
     super(message, vscode.TreeItemCollapsibleState.None);
-    this.contextValue = 'layergit.empty';
-    this.iconPath = new vscode.ThemeIcon('info');
+    this.contextValue = 'layergit.message';
+    this.description = detail;
+    this.iconPath = new vscode.ThemeIcon(icon);
   }
+}
+
+class ActionNode extends vscode.TreeItem {
+  constructor(label: string, command: string, icon: string) {
+    super(label, vscode.TreeItemCollapsibleState.None);
+    this.contextValue = 'layergit.action.workspace';
+    this.iconPath = new vscode.ThemeIcon(icon);
+    this.command = { command, title: label };
+  }
+}
+
+class SectionNode extends vscode.TreeItem {
+  constructor(label: string) {
+    super(label, vscode.TreeItemCollapsibleState.None);
+    this.contextValue = 'layergit.section';
+    this.iconPath = new vscode.ThemeIcon('dash');
+  }
+}
+
+function outputUri(workspace: vscode.Uri, output: string): vscode.Uri {
+  const segments = output.replace(/^\.\//, '').split(/[\\/]+/).filter(Boolean);
+  return vscode.Uri.joinPath(workspace, ...segments);
 }
 
 function buildTree(workspace: vscode.Uri, output: string, files: TreeFile[]): DirectoryNode[] {

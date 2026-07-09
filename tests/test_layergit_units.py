@@ -72,49 +72,49 @@ class LayerGitUnitTest(unittest.TestCase):
 
         with patch("layergit.gitops.run_git") as run_git:
             run_git.side_effect = [
-                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, f"{self.root}\n", ""),
                 subprocess.CompletedProcess([], 1, "", ""),
             ]
             self.assertIsNone(gitops.current_commit(self.root))
 
         with patch("layergit.gitops.run_git") as run_git:
             run_git.side_effect = [
-                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, f"{self.root}\n", ""),
                 subprocess.CompletedProcess([], 0, "", ""),
             ]
             self.assertEqual(gitops.current_branch(self.root), "detached")
 
         with patch("layergit.gitops.run_git") as run_git:
             run_git.side_effect = [
-                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, f"{self.root}\n", ""),
                 subprocess.CompletedProcess([], 1, "", ""),
             ]
             self.assertIsNone(gitops.current_branch(self.root))
 
         with patch("layergit.gitops.run_git") as run_git:
             run_git.side_effect = [
-                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, f"{self.root}\n", ""),
                 subprocess.CompletedProcess([], 1, "", ""),
             ]
             self.assertEqual(gitops.porcelain_status(self.root), "error")
 
         with patch("layergit.gitops.run_git") as run_git:
             run_git.side_effect = [
-                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, f"{self.root}\n", ""),
                 subprocess.CompletedProcess([], 0, " M file.c\n", ""),
             ]
             self.assertEqual(gitops.porcelain_status(self.root), "modified")
 
         with patch("layergit.gitops.run_git") as run_git:
             run_git.side_effect = [
-                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, f"{self.root}\n", ""),
                 subprocess.CompletedProcess([], 1, "", ""),
             ]
             self.assertEqual(gitops.tracked_files(self.root), [])
 
         with patch("layergit.gitops.run_git") as run_git:
             run_git.side_effect = [
-                subprocess.CompletedProcess([], 0, "true\n", ""),
+                subprocess.CompletedProcess([], 0, f"{self.root}\n", ""),
                 subprocess.CompletedProcess([], 0, "abc123\n", ""),
             ]
             self.assertEqual(gitops.current_commit(self.root), "abc123")
@@ -393,7 +393,7 @@ class LayerGitUnitTest(unittest.TestCase):
             ),
         )
         self.assertIn(
-            "Hidden providers",
+            "Hidden by selection",
             reports.format_explain(
                 "hidden.c",
                 {
@@ -557,6 +557,16 @@ class LayerGitUnitTest(unittest.TestCase):
     def test_manifest_and_cli_helpers(self) -> None:
         with self.assertRaisesRegex(LayerError, "No layer.yaml"):
             manifest.load_manifest(self.root)
+        self.assertEqual(manifest.normalize_mount(None), "/")
+        self.assertEqual(manifest.normalize_mount(""), "/")
+        self.assertEqual(manifest.normalize_mount("."), "/")
+        self.assertEqual(manifest.normalize_mount("app//src"), "/app/src")
+        self.assertEqual(manifest.buildtree_path_for_source("src/main.c", "/app"), "app/src/main.c")
+        self.assertEqual(manifest.source_path_for_buildtree("app/src/main.c", "/app"), "src/main.c")
+        self.assertIsNone(manifest.source_path_for_buildtree("docs/readme.md", "/app"))
+        for bad_mount in ("../outside", "/tmp/outside", "C:\\temp", "app/../../outside"):
+            with self.assertRaisesRegex(LayerError, "Invalid layer mount"):
+                manifest.normalize_mount(bad_mount)
         self.assertIsNone(cli.gitignore_output_entry(self.root, "/outside"))
         self.assertIsNone(cli.gitignore_output_entry(self.root, "."))
         self.assertEqual(cli.infer_layer_name("git@example.com:Team/My Repo.git", []), "my-repo")
@@ -589,6 +599,7 @@ class LayerGitUnitTest(unittest.TestCase):
             repo="/tmp/repo-a",
             name=None,
             revision=None,
+            mount="/",
             before=None,
             after=None,
             top=False,

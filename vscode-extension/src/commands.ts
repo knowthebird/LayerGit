@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { LayerGitCli } from './cli';
 import { DirectoryNode, FileNode } from './composedTreeView';
 import { LayerItem } from './layersView';
+import { LayerGitStatus, TreeFile } from './models';
 import { findLayerGitWorkspace, relativeComposedPath } from './workspace';
 
 export interface Refreshable {
@@ -22,7 +23,19 @@ export function registerCommands(
       if (!workspace) {
         return;
       }
-      await runCliAction(cli, workspace, ['init'], refresh);
+      if (await runCliAction(cli, workspace, ['init'], refresh)) {
+        vscode.window.showInformationMessage('Initialized LayerGit workspace.');
+      }
+    }),
+    vscode.commands.registerCommand('layergit.openOutput', async () => {
+      cli.showOutput();
+    }),
+    vscode.commands.registerCommand('layergit.compose', async () => {
+      const workspace = await requireLayerGitWorkspace();
+      if (!workspace) {
+        return;
+      }
+      await runCliAction(cli, workspace, ['compose'], refresh);
     }),
     vscode.commands.registerCommand('layergit.pullAll', async () => {
       const workspace = await requireLayerGitWorkspace();
@@ -42,6 +55,18 @@ export function registerCommands(
     }),
     vscode.commands.registerCommand('layergit.setWriteLayer', async (node?: LayerItem) => {
       await setWriteLayer(cli, node, refresh);
+    }),
+    vscode.commands.registerCommand('layergit.openLayerCache', async (node?: LayerItem) => {
+      await openLayerCache(node);
+    }),
+    vscode.commands.registerCommand('layergit.gitStatusLayer', async (node?: LayerItem) => {
+      await gitStatusLayer(cli, node);
+    }),
+    vscode.commands.registerCommand('layergit.applyLayer', async (node?: LayerItem) => {
+      await applyLayer(cli, node, refresh);
+    }),
+    vscode.commands.registerCommand('layergit.applyAll', async () => {
+      await applyAll(cli, refresh);
     }),
     vscode.commands.registerCommand('layergit.openManifest', async () => {
       const workspace = await requireLayerGitWorkspace();
@@ -94,16 +119,51 @@ export function registerCommands(
     vscode.commands.registerCommand('layergit.sendLayerToBottom', async (node?: LayerItem) => {
       await moveLayer(cli, node, 'bottom', refresh);
     }),
-    vscode.commands.registerCommand('layergit.useLayerForFile', async (node?: FileNode) => {
-      await useLayerForFile(cli, node, refresh);
+    vscode.commands.registerCommand('layergit.useLayerForFile', async (node?: FileNode, selected?: FileNode[]) => {
+      await useLayerForFile(cli, node, selected, refresh);
     }),
     vscode.commands.registerCommand('layergit.useLayerForFolder', async (node?: DirectoryNode) => {
       await useLayerForFolder(cli, node, refresh);
+    }),
+    vscode.commands.registerCommand('layergit.applyFile', async (node?: FileNode, selected?: FileNode[]) => {
+      await applyFile(cli, node, selected, refresh);
+    }),
+    vscode.commands.registerCommand('layergit.clearSelection', async (node?: FileNode, selected?: FileNode[]) => {
+      await clearSelection(cli, node, selected, refresh);
     })
   );
 }
 
 async function addLayer(cli: LayerGitCli, refresh: () => void): Promise<void> {
+  const picked = await vscode.window.showQuickPick(
+    [
+      {
+        label: 'Add Repo Layer',
+        description: 'Clone or link an existing Git repository into the layer stack',
+        action: 'repo' as const,
+      },
+      {
+        label: 'Add Local Layer',
+        description: 'Create a local Git-backed layer under .layer/cache/',
+        action: 'local' as const,
+      },
+    ],
+    {
+      title: 'LayerGit: Add Layer',
+      placeHolder: 'Choose the kind of layer to add',
+    }
+  );
+  if (!picked) {
+    return;
+  }
+  if (picked.action === 'local') {
+    await addLocalLayer(cli, refresh);
+    return;
+  }
+  await addRepoLayer(cli, refresh);
+}
+
+async function addRepoLayer(cli: LayerGitCli, refresh: () => void): Promise<void> {
   const workspace = await requireLayerGitWorkspace();
   if (!workspace) {
     return;
@@ -182,6 +242,48 @@ async function setWriteLayer(
   await runCliAction(cli, workspace, ['write', layerName], refresh);
 }
 
+async function openLayerCache(node: LayerItem | undefined): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  if (!workspace || !node) {
+    return;
+  }
+  const cache = vscode.Uri.joinPath(workspace, '.layer', 'cache', node.layer.name);
+  await vscode.commands.executeCommand('vscode.openFolder', cache, { forceNewWindow: true });
+}
+
+async function gitStatusLayer(cli: LayerGitCli, node: LayerItem | undefined): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  if (!workspace || !node) {
+    return;
+  }
+  try {
+    const stdout = await cli.run(workspace, ['-L', node.layer.name, 'git', 'status', '--short']);
+    cli.showDetails(`LayerGit Git Status: ${node.layer.name}`, [stdout.trim() || 'clean']);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function applyLayer(
+  cli: LayerGitCli,
+  node: LayerItem | undefined,
+  refresh: () => void
+): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  if (!workspace || !node) {
+    return;
+  }
+  await runCliAction(cli, workspace, ['apply', '--layer', node.layer.name], refresh);
+}
+
+async function applyAll(cli: LayerGitCli, refresh: () => void): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  if (!workspace) {
+    return;
+  }
+  await runCliAction(cli, workspace, ['apply', '--all'], refresh);
+}
+
 async function setLayerEnabled(
   cli: LayerGitCli,
   node: LayerItem | undefined,
@@ -211,10 +313,12 @@ async function moveLayer(
 async function useLayerForFile(
   cli: LayerGitCli,
   node: FileNode | undefined,
+  selected: FileNode[] | undefined,
   refresh: () => void
 ): Promise<void> {
   const workspace = await requireLayerGitWorkspace();
-  if (!workspace || !node) {
+  const files = selectedFileNodes(node, selected);
+  if (!workspace || !files.length) {
     return;
   }
   const status = await cli.status(workspace);
@@ -226,8 +330,8 @@ async function useLayerForFile(
       layer,
     })),
     {
-      title: `Use layer for ${node.file.path}`,
-      placeHolder: 'Select the layer/repo to use for this file',
+      title: files.length === 1 ? `Use layer for ${files[0].file.path}` : `Use layer for ${files.length} files`,
+      placeHolder: 'Select the layer/repo to use for the selected file(s)',
     }
   );
   if (!picked) {
@@ -237,7 +341,118 @@ async function useLayerForFile(
     vscode.window.showWarningMessage(`Layer ${picked.layer.name} is disabled. Enable it before selecting it for a file.`);
     return;
   }
-  await runCliAction(cli, workspace, ['use', node.file.path, picked.layer.name], refresh);
+  const runAction = files.length === 1
+    ? (args: string[]) => runCliAction(cli, workspace, args, refresh)
+    : (args: string[]) => runCliActionWithoutRefresh(cli, workspace, args);
+  let succeeded = 0;
+  for (const file of files) {
+    if (await useLayerForOneFile(cli, workspace, status, file, picked.layer.name, runAction)) {
+      succeeded += 1;
+    }
+  }
+  if (files.length > 1) {
+    refresh();
+    showBatchResult('Applied layer selection', succeeded, files.length);
+  }
+}
+
+type CliAction = (args: string[]) => Promise<boolean>;
+
+async function useLayerForOneFile(
+  cli: LayerGitCli,
+  workspace: vscode.Uri,
+  status: LayerGitStatus,
+  node: FileNode,
+  layerName: string,
+  runAction: CliAction
+): Promise<boolean> {
+  const targetProvidesFile = layerProvidesFile(node.file, layerName);
+  if (hasModifiedFile(status, node.file.path)) {
+    return handleDirtyFileSelection(cli, workspace, node.file.path, layerName, targetProvidesFile, runAction);
+  }
+  if (!targetProvidesFile) {
+    return handleMissingProviderSelection(cli, workspace, node.file.path, layerName, Boolean(node.file.hidden), runAction);
+  }
+  return runAction(['use', node.file.path, layerName]);
+}
+
+async function handleDirtyFileSelection(
+  cli: LayerGitCli,
+  workspace: vscode.Uri,
+  filePath: string,
+  layerName: string,
+  targetProvidesFile: boolean,
+  runAction: CliAction
+): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    `${filePath} has unapplied buildtree edits. Choose how to handle them before selecting ${layerName}.`,
+    { modal: true },
+    'Apply to Current Layer',
+    'Adopt Edits into Selected Layer',
+    'Discard Edits and Switch'
+  );
+  if (!choice) {
+    return false;
+  }
+  if (choice === 'Adopt Edits into Selected Layer') {
+    return runAction(['adopt', filePath, layerName]);
+  }
+  if (choice === 'Apply to Current Layer') {
+    const applied = await runAction(['apply', filePath]);
+    if (!applied) {
+      return false;
+    }
+    if (targetProvidesFile) {
+      return runAction(['use', filePath, layerName]);
+    }
+    return handleMissingProviderSelection(cli, workspace, filePath, layerName, false, runAction);
+  }
+  const composed = await runAction(['compose']);
+  if (!composed) {
+    return false;
+  }
+  if (targetProvidesFile) {
+    return runAction(['use', filePath, layerName]);
+  }
+  return handleMissingProviderSelection(cli, workspace, filePath, layerName, false, runAction);
+}
+
+async function handleMissingProviderSelection(
+  cli: LayerGitCli,
+  workspace: vscode.Uri,
+  filePath: string,
+  layerName: string,
+  fileHidden: boolean,
+  runAction: CliAction
+): Promise<boolean> {
+  if (fileHidden) {
+    const choice = await vscode.window.showWarningMessage(
+      `${filePath} is currently hidden by layer selection. Restore the inherited file before adopting it into ${layerName}.`,
+      { modal: true },
+      'Restore Then Adopt',
+      'Keep Hidden'
+    );
+    if (choice === 'Restore Then Adopt') {
+      const restored = await runAction(['unuse', filePath]);
+      if (restored) {
+        return runAction(['adopt', filePath, layerName]);
+      }
+    }
+    return false;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    `${layerName} does not currently provide ${filePath}. Choose whether to hide the inherited file or copy the current buildtree file into ${layerName}.`,
+    { modal: true },
+    'Hide Inherited File',
+    'Adopt Current File'
+  );
+  if (choice === 'Hide Inherited File') {
+    return runAction(['use', filePath, layerName, '--hide']);
+  }
+  if (choice === 'Adopt Current File') {
+    return runAction(['adopt', filePath, layerName]);
+  }
+  return false;
 }
 
 async function useLayerForFolder(
@@ -259,7 +474,7 @@ async function useLayerForFolder(
     return;
   }
   const confirmed = await vscode.window.showWarningMessage(
-    `Use layer ${layerName} for ${files.length} file(s) under ${node.relativePath}/? Files not provided by that layer may be hidden.`,
+    `Use layer ${layerName} for ${files.length} file(s) under ${node.relativePath}/? Files not provided by that layer will be skipped and reported.`,
     { modal: true },
     'Apply Recursively'
   );
@@ -269,6 +484,14 @@ async function useLayerForFolder(
 
   let failures = 0;
   for (const file of files) {
+    if (!layerProvidesFile(file.file, layerName)) {
+      failures += 1;
+      cli.showDetails(`LayerGit folder selection skipped: ${file.file.path}`, [
+        `${layerName} does not currently provide ${file.file.path}.`,
+        `Use the file context menu to hide or adopt this file explicitly.`,
+      ]);
+      continue;
+    }
     try {
       await cli.run(workspace, ['use', file.file.path, layerName]);
     } catch (error) {
@@ -281,6 +504,56 @@ async function useLayerForFolder(
   if (failures) {
     vscode.window.showWarningMessage(`Applied folder layer selection with ${failures} failure(s). See LayerGit output.`);
   }
+}
+
+async function applyFile(
+  cli: LayerGitCli,
+  node: FileNode | undefined,
+  selected: FileNode[] | undefined,
+  refresh: () => void
+): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  const files = selectedFileNodes(node, selected);
+  if (!workspace || !files.length) {
+    return;
+  }
+  if (files.length === 1) {
+    await runCliAction(cli, workspace, ['apply', files[0].file.path], refresh);
+    return;
+  }
+  let succeeded = 0;
+  for (const file of files) {
+    if (await runCliActionWithoutRefresh(cli, workspace, ['apply', file.file.path])) {
+      succeeded += 1;
+    }
+  }
+  refresh();
+  showBatchResult('Applied buildtree changes', succeeded, files.length);
+}
+
+async function clearSelection(
+  cli: LayerGitCli,
+  node: FileNode | undefined,
+  selected: FileNode[] | undefined,
+  refresh: () => void
+): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  const files = selectedFileNodes(node, selected);
+  if (!workspace || !files.length) {
+    return;
+  }
+  if (files.length === 1) {
+    await runCliAction(cli, workspace, ['unuse', files[0].file.path], refresh);
+    return;
+  }
+  let succeeded = 0;
+  for (const file of files) {
+    if (await runCliActionWithoutRefresh(cli, workspace, ['unuse', file.file.path])) {
+      succeeded += 1;
+    }
+  }
+  refresh();
+  showBatchResult('Cleared layer selection', succeeded, files.length);
 }
 
 async function pickLayerName(
@@ -313,11 +586,12 @@ async function pickLayerName(
 }
 
 function layerDescription(
-  layer: { kind?: string; enabled: boolean; branch?: string | null; status?: string },
+  layer: { kind?: string; mount?: string; enabled: boolean; branch?: string | null; status?: string },
   writeLayer = false
 ): string {
   return [
     layer.kind ?? 'git',
+    layer.mount ?? '/',
     layer.enabled ? 'enabled' : 'disabled',
     layer.branch,
     layer.status,
@@ -327,9 +601,32 @@ function layerDescription(
     .join(' ');
 }
 
+function layerProvidesFile(file: TreeFile, layerName: string): boolean {
+  if (file.visibleLayer === layerName) {
+    return true;
+  }
+  if (file.maskedByThisFile?.includes(layerName)) {
+    return true;
+  }
+  return Boolean(file.maskedProviders?.some((provider) => provider.layer === layerName));
+}
+
+function hasModifiedFile(status: LayerGitStatus, filePath: string): boolean {
+  return Boolean(status.modified_files?.some((item) => item.path === filePath));
+}
+
+function selectedFileNodes(node: FileNode | undefined, selected: FileNode[] | undefined): FileNode[] {
+  const files = (selected?.length ? selected : node ? [node] : []).filter((item): item is FileNode => item instanceof FileNode);
+  const byPath = new Map<string, FileNode>();
+  for (const file of files) {
+    byPath.set(file.file.path, file);
+  }
+  return [...byPath.values()];
+}
+
 function providerLines(
   title: string,
-  providers: { layer?: string; sourcePath?: string; source_path?: string; revision?: string; commit?: string }[],
+  providers: { layer?: string; sourcePath?: string; source_path?: string; mount?: string; revision?: string; commit?: string }[],
   filePath: string
 ): string[] {
   return [
@@ -337,8 +634,9 @@ function providerLines(
     ...(providers.length
       ? providers.map((item) => {
           const source = item.sourcePath ?? item.source_path ?? filePath;
+          const mount = item.mount ?? '/';
           const revision = item.revision ?? item.commit ?? 'unknown';
-          return `  ${item.layer}: ${source} @ ${revision}`;
+          return `  ${item.layer}: ${source} mounted at ${mount} @ ${revision}`;
         })
       : ['  none']),
   ];
@@ -352,6 +650,7 @@ async function explain(cli: LayerGitCli, workspace: vscode.Uri, filePath: string
       `Visible layer: ${visible}`,
       ...(result.selected_layer ? [`Selected layer: ${result.selected_layer}`] : []),
       `Source path: ${result.visible?.sourcePath ?? result.visible?.source_path ?? 'none'}`,
+      `Mount: ${result.visible?.mount ?? 'none'}`,
       `Revision: ${result.visible?.revision ?? result.visible?.commit ?? 'none'}`,
       '',
       ...providerLines(result.hidden ? 'Hidden providers:' : 'Masked layers:', result.masked ?? [], filePath),
@@ -373,13 +672,37 @@ async function runCliAction(
   workspace: vscode.Uri,
   args: string[],
   refresh: () => void
-): Promise<void> {
+): Promise<boolean> {
   try {
     await cli.run(workspace, args);
     refresh();
+    return true;
   } catch (error) {
     showError(error);
+    return false;
   }
+}
+
+async function runCliActionWithoutRefresh(
+  cli: LayerGitCli,
+  workspace: vscode.Uri,
+  args: string[]
+): Promise<boolean> {
+  try {
+    await cli.run(workspace, args);
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  }
+}
+
+function showBatchResult(action: string, succeeded: number, total: number): void {
+  if (succeeded === total) {
+    vscode.window.showInformationMessage(`${action} for ${succeeded} file(s).`);
+    return;
+  }
+  vscode.window.showWarningMessage(`${action} for ${succeeded} of ${total} file(s). See LayerGit output for failures.`);
 }
 
 async function requireLayerGitWorkspace(): Promise<vscode.Uri | undefined> {

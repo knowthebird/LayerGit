@@ -27,10 +27,15 @@ def run_git(
 
 def is_git_repo(path: Path) -> bool:
     try:
-        result = run_git(["rev-parse", "--is-inside-work-tree"], path, check=False)
+        result = run_git(["rev-parse", "--show-toplevel"], path, check=False)
     except FileNotFoundError as exc:
         raise LayerError("git executable was not found") from exc
-    return result.returncode == 0 and result.stdout.strip() == "true"
+    if result.returncode != 0:
+        return False
+    try:
+        return Path(result.stdout.strip()).resolve() == path.resolve()
+    except OSError:
+        return False
 
 
 def layer_cache_path(root: Path, name: str) -> Path:

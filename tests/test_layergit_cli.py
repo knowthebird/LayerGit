@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -217,7 +218,7 @@ class LayerGitCliTest(unittest.TestCase):
         product_line = next(line for line in table_lines if "product" in line)
         base_line = next(line for line in table_lines if "workspace-base" in line)
         self.assertLess(result.stdout.index(product_line), result.stdout.index(base_line))
-        self.assertRegex(product_line, r"^\s*2\s+product\s+git\s+enabled\s+dirty\s+main\s+[0-9a-f]+\s+top$")
+        self.assertRegex(product_line, r"^\s*2\s+product\s+git\s+/\s+enabled\s+dirty\s+main\s+[0-9a-f]+\s+top$")
         self.assertIn("1", base_line)
         self.assertIn("workspace-base", base_line)
         self.assertIn("local", base_line)
@@ -379,6 +380,140 @@ class LayerGitCliTest(unittest.TestCase):
         disabled_data = json.loads(disabled.stdout)
         self.assertEqual(disabled_data["overlaps"], [])
 
+    def test_mount_paths_compose_and_report_provenance(self) -> None:
+        app = self.make_repo("app", {"src/main.c": "app\n"})
+        docs = self.make_repo("docs", {"README.md": "docs\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+
+        app_add = self.run_layer("add", str(app), "app", "--mount", "app")
+        docs_add = self.run_layer("add", str(docs), "docs", "--mount", "/docs//")
+
+        self.assertEqual(app_add.returncode, 0, app_add.stdout + app_add.stderr)
+        self.assertEqual(docs_add.returncode, 0, docs_add.stdout + docs_add.stderr)
+        self.assertEqual((self.workspace / "buildtree" / "app" / "src" / "main.c").read_text(), "app\n")
+        self.assertEqual((self.workspace / "buildtree" / "docs" / "README.md").read_text(), "docs\n")
+        self.assertFalse((self.workspace / "buildtree" / "src" / "main.c").exists())
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertEqual([layer["mount"] for layer in manifest["layers"]], ["/app", "/docs"])
+
+        ownership = self.ownership()["app/src/main.c"]
+        self.assertEqual(ownership["visible"]["layer"], "app")
+        self.assertEqual(ownership["visible"]["source_path"], "src/main.c")
+        self.assertEqual(ownership["visible"]["mount"], "/app")
+        self.assertTrue(ownership["visible"]["visible"])
+        explain = self.run_layer("explain", "app/src/main.c", "--json")
+        self.assertEqual(explain.returncode, 0, explain.stderr)
+        explain_data = json.loads(explain.stdout)
+        self.assertEqual(explain_data["visible"]["sourcePath"], "src/main.c")
+        self.assertEqual(explain_data["visible"]["mount"], "/app")
+
+        status = self.run_layer("status")
+        status_json = self.status_json()
+        tree = self.tree_json()
+        self.assertIn("MOUNT", status.stdout)
+        self.assertEqual(status_json["layers"][0]["mount"], "/app")
+        app_tree = next(item for item in tree["files"] if item["path"] == "app/src/main.c")
+        self.assertEqual(app_tree["sourcePath"], "src/main.c")
+        self.assertEqual(app_tree["mount"], "/app")
+
+    def test_mounted_overlaps_use_and_distinct_mounts(self) -> None:
+        repo_a = self.make_repo("repo-a", {"gpio.c": "a\n"})
+        repo_b = self.make_repo("repo-b", {"gpio.c": "b\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_a), "a", "--mount", "/drivers").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_b), "b", "--mount", "/drivers").returncode, 0)
+
+        self.assertEqual((self.workspace / "buildtree" / "drivers" / "gpio.c").read_text(), "b\n")
+        overlaps = json.loads(self.run_layer("overlaps", "drivers/gpio.c", "--json").stdout)
+        self.assertEqual(overlaps["overlaps"][0]["visible"]["layer"], "b")
+        self.assertEqual(overlaps["overlaps"][0]["visible"]["source_path"], "gpio.c")
+        self.assertEqual(overlaps["overlaps"][0]["visible"]["mount"], "/drivers")
+        self.assertTrue(overlaps["overlaps"][0]["visible"]["visible"])
+        self.assertEqual(overlaps["overlaps"][0]["masked"][0]["layer"], "a")
+        self.assertFalse(overlaps["overlaps"][0]["masked"][0]["visible"])
+
+        selected = self.run_layer("use", "drivers/gpio.c", "a")
+        self.assertEqual(selected.returncode, 0, selected.stdout + selected.stderr)
+        self.assertEqual((self.workspace / "buildtree" / "drivers" / "gpio.c").read_text(), "a\n")
+        other_workspace = self.base / "workspace-distinct"
+        other_workspace.mkdir()
+        self.assertEqual(self.run_layer("init", "--no-base-layer", cwd=other_workspace).returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_a), "a", "--mount", "/drivers/a", cwd=other_workspace).returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_b), "b", "--mount", "/drivers/b", cwd=other_workspace).returncode, 0)
+        distinct = self.run_layer("overlaps", "--json", cwd=other_workspace)
+        self.assertEqual(json.loads(distinct.stdout)["overlaps"], [])
+
+    def test_apply_uses_mounted_source_path_for_owned_and_new_files(self) -> None:
+        app = self.make_repo("app", {"src/main.c": "before\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(app), "app", "--mount", "/app").returncode, 0)
+        self.assertEqual(self.run_layer("write", "app").returncode, 0)
+        (self.workspace / "buildtree" / "app" / "src" / "main.c").write_text("after\n")
+        new_file = self.workspace / "buildtree" / "app" / "new.c"
+        new_file.write_text("new\n")
+        outside = self.workspace / "buildtree" / "docs" / "readme.md"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("docs\n")
+
+        owned = self.run_layer("apply", "app/src/main.c")
+        new = self.run_layer("apply", "app/new.c")
+        outside_result = self.run_layer("apply", "docs/readme.md")
+
+        self.assertEqual(owned.returncode, 0, owned.stdout + owned.stderr)
+        self.assertEqual(new.returncode, 0, new.stdout + new.stderr)
+        self.assertEqual((self.workspace / ".layer" / "cache" / "app" / "src" / "main.c").read_text(), "after\n")
+        self.assertEqual((self.workspace / ".layer" / "cache" / "app" / "new.c").read_text(), "new\n")
+        self.assertFalse((self.workspace / ".layer" / "cache" / "app" / "app" / "new.c").exists())
+        self.assertNotEqual(outside_result.returncode, 0)
+        self.assertIn("outside mount /app", outside_result.stderr)
+
+    def test_adopt_uses_mounted_source_path_and_rejects_outside_mount(self) -> None:
+        app = self.make_repo("app", {"src/main.c": "before\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(app), "app", "--mount", "/app").returncode, 0)
+        new_file = self.workspace / "buildtree" / "app" / "new.c"
+        new_file.write_text("new\n")
+        outside = self.workspace / "buildtree" / "docs" / "readme.md"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("docs\n")
+
+        adopted = self.run_layer("adopt", "app/new.c", "app")
+        outside_result = self.run_layer("adopt", "docs/readme.md", "app")
+
+        self.assertEqual(adopted.returncode, 0, adopted.stdout + adopted.stderr)
+        self.assertEqual((self.workspace / ".layer" / "cache" / "app" / "new.c").read_text(), "new\n")
+        self.assertFalse((self.workspace / ".layer" / "cache" / "app" / "app" / "new.c").exists())
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertEqual(manifest["file_selection"]["app/new.c"]["layer"], "app")
+        self.assertTrue(manifest["file_selection"]["app/new.c"]["adopted"])
+        self.assertNotEqual(outside_result.returncode, 0)
+        self.assertIn("outside mount /app", outside_result.stderr)
+
+    def test_invalid_mounts_are_rejected(self) -> None:
+        repo = self.make_repo("repo", {"file.c": "ok\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        for bad_mount in ("../outside", "/tmp/outside", "C:\\temp", "app/../../outside"):
+            result = self.run_layer("add", str(repo), f"bad-{len(bad_mount)}", "--mount", bad_mount)
+            self.assertNotEqual(result.returncode, 0, bad_mount)
+            self.assertIn("Invalid layer mount", result.stderr)
+
+    def test_mounted_layer_disable_removes_owned_files_and_preserves_unowned_files(self) -> None:
+        app = self.make_repo("app", {"src/main.c": "app\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(app), "app", "--mount", "/app").returncode, 0)
+        unowned = self.workspace / "buildtree" / "app" / "output.bin"
+        unowned.write_text("artifact\n")
+
+        disabled = self.run_layer("disable", "app")
+
+        self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        self.assertFalse((self.workspace / "buildtree" / "app" / "src" / "main.c").exists())
+        self.assertTrue(unowned.exists())
+        self.assertTrue((self.workspace / ".layer" / "cache" / "app" / "src" / "main.c").exists())
+        tree = self.tree_json()
+        untracked = next(item for item in tree["files"] if item["path"] == "app/output.bin")
+        self.assertEqual(untracked["ownership"], "untracked")
+
     def test_top_wins_masks_lower_layers_and_explain_reports_provenance(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
         repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
@@ -445,7 +580,7 @@ class LayerGitCliTest(unittest.TestCase):
         manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
         self.assertNotIn("file_selection", manifest)
 
-    def test_use_can_hide_file_when_selected_layer_does_not_provide_it(self) -> None:
+    def test_use_requires_hide_for_layer_that_does_not_provide_path(self) -> None:
         base = self.make_repo("base", {"README.md": "base\n"})
         top = self.make_repo("top", {"common/util.c": "from top\n"})
         self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
@@ -455,24 +590,240 @@ class LayerGitCliTest(unittest.TestCase):
 
         result = self.run_layer("use", "common/util.c", "base")
 
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("common/util.c is not provided by base", result.stderr)
+        self.assertIn("layer use common/util.c base --hide", result.stderr)
+        self.assertIn("layer adopt common/util.c base", result.stderr)
+        self.assertTrue((self.workspace / "buildtree" / "common" / "util.c").exists())
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertNotIn("file_selection", manifest)
+
+    def test_use_hide_assigns_path_to_layer_that_does_not_provide_it(self) -> None:
+        base = self.make_repo("base", {"README.md": "base\n"})
+        top = self.make_repo("top", {"common/util.c": "from top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        self.assertTrue((self.workspace / "buildtree" / "common" / "util.c").exists())
+
+        result = self.run_layer("use", "common/util.c", "base", "--hide")
+
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("common/util.c assigned to base.", result.stdout)
+        self.assertIn("base does not currently provide this file", result.stdout)
+        self.assertIn("--hide will hide the path from buildtree", result.stdout)
         self.assertFalse((self.workspace / "buildtree" / "common" / "util.c").exists())
-        tree = self.run_layer("tree", "--json")
-        tree_data = json.loads(tree.stdout)
+        self.assertTrue((self.workspace / ".layer" / "cache" / "top" / "common" / "util.c").exists())
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertEqual(manifest["file_selection"]["common/util.c"], {"layer": "base", "hide": True})
+        ownership = self.ownership()["common/util.c"]
+        self.assertIsNone(ownership["visible"])
+        self.assertTrue(ownership["hidden"])
+        self.assertEqual(ownership["selected_layer"], "base")
+        self.assertEqual(ownership["selected_mount"], "/")
+        self.assertEqual(ownership["reason"], "selected layer does not provide this file")
+        self.assertEqual([item["layer"] for item in ownership["masked"]], ["top"])
+        tree_data = self.tree_json()
         hidden_file = next(item for item in tree_data["files"] if item["path"] == "common/util.c")
         self.assertTrue(hidden_file["hidden"])
         self.assertEqual(hidden_file["selectedLayer"], "base")
         self.assertIsNone(hidden_file["visibleLayer"])
+        self.assertEqual(hidden_file["reason"], "selected layer does not provide this file")
         explain = self.run_layer("explain", "common/util.c", "--json")
         data = json.loads(explain.stdout)
         self.assertIsNone(data["visible"])
         self.assertTrue(data["hidden"])
         self.assertEqual(data["selected_layer"], "base")
         self.assertEqual(data["masked"][0]["layer"], "top")
+        self.assertEqual(data["reason"], "selected layer does not provide this file")
+        self.assertIn("Hidden by selection", self.run_layer("explain", "common/util.c").stdout)
+        overlaps = json.loads(self.run_layer("overlaps", "common/util.c", "--json").stdout)
+        self.assertIsNone(overlaps["overlaps"][0]["visible"])
+        self.assertEqual(overlaps["overlaps"][0]["selected_layer"], "base")
+        diff = json.loads(self.run_layer("diff", "common/util.c", "--json").stdout)
+        self.assertEqual(diff["hidden"][0]["selected_layer"], "base")
+        self.assertEqual(diff["deleted"], [])
+        status = self.status_json()
+        self.assertEqual(status["buildtree"]["untracked"], [])
+        self.assertEqual(status["composed_tree"]["stale_owned_files"], 0)
+        adopt_hidden = self.run_layer("adopt", "common/util.c", "base")
+        self.assertNotEqual(adopt_hidden.returncode, 0)
+        self.assertIn("Cannot adopt common/util.c because it is hidden by selection", adopt_hidden.stderr)
+        self.assertIn("layer unuse common/util.c", adopt_hidden.stderr)
+        self.assertIn("layer adopt common/util.c base", adopt_hidden.stderr)
+        apply_hidden = self.run_layer("apply", "common/util.c")
+        self.assertNotEqual(apply_hidden.returncode, 0)
+        self.assertIn("Cannot apply common/util.c because it is hidden by selection", apply_hidden.stderr)
+
+        hidden_path = self.workspace / "buildtree" / "common" / "util.c"
+        hidden_path.parent.mkdir(parents=True)
+        hidden_path.write_text("created in assigned layer\n")
+        apply_created = self.run_layer("apply", "common/util.c")
+        self.assertEqual(apply_created.returncode, 0, apply_created.stdout + apply_created.stderr)
         self.assertEqual(
-            data["reason"],
-            "selected layer does not provide this file; higher-layer files are hidden",
+            (self.workspace / ".layer" / "cache" / "base" / "common" / "util.c").read_text(),
+            "created in assigned layer\n",
         )
+        self.assertEqual((self.workspace / ".layer" / "cache" / "top" / "common" / "util.c").read_text(), "from top\n")
+
+        unuse = self.run_layer("unuse", "common/util.c")
+        self.assertEqual(unuse.returncode, 0, unuse.stdout + unuse.stderr)
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "from top\n")
+
+    def test_use_hide_does_not_treat_untracked_cache_file_as_adopted(self) -> None:
+        base = self.make_repo("base", {"README.md": "base\n"})
+        top = self.make_repo("top", {"common/util.c": "from top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        base_file = self.workspace / ".layer" / "cache" / "base" / "common" / "util.c"
+        base_file.parent.mkdir(parents=True)
+        base_file.write_text("untracked base cache file\n")
+
+        result = self.run_layer("use", "common/util.c", "base", "--hide")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.workspace / "buildtree" / "common" / "util.c").exists())
+        ownership = self.ownership()["common/util.c"]
+        self.assertIsNone(ownership["visible"])
+        self.assertTrue(ownership["hidden"])
+        self.assertEqual(ownership["selected_layer"], "base")
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertEqual(manifest["file_selection"]["common/util.c"], {"layer": "base", "hide": True})
+
+    def test_adopt_copies_buildtree_file_into_target_layer_and_stages_new_file(self) -> None:
+        base = self.make_repo("base", {"README.md": "base\n"})
+        top = self.make_repo("top", {"common/util.c": "from top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("edited in buildtree\n")
+
+        result = self.run_layer("adopt", "common/util.c", "base")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Adopted common/util.c into base.", result.stdout)
+        self.assertIn("Staged common/util.c in base.", result.stdout)
+        self.assertEqual(
+            (self.workspace / ".layer" / "cache" / "base" / "common" / "util.c").read_text(),
+            "edited in buildtree\n",
+        )
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "edited in buildtree\n")
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertEqual(manifest["file_selection"]["common/util.c"]["layer"], "base")
+        self.assertTrue(manifest["file_selection"]["common/util.c"]["adopted"])
+        explain = json.loads(self.run_layer("explain", "common/util.c", "--json").stdout)
+        self.assertEqual(explain["visible"]["layer"], "base")
+        self.assertEqual(explain["visible"]["sourcePath"], "common/util.c")
+        self.assertFalse(explain.get("hidden", False))
+        self.assertEqual([item["layer"] for item in explain["masked"]], ["top"])
+        git_status = self.run_layer("-L", "base", "git", "status", "--short")
+        self.assertEqual(git_status.returncode, 0, git_status.stderr)
+        self.assertIn("A  common/util.c", git_status.stdout)
+
+        disabled_top = self.run_layer("disable", "top")
+        self.assertEqual(disabled_top.returncode, 0, disabled_top.stdout + disabled_top.stderr)
+        disabled_explain = json.loads(self.run_layer("explain", "common/util.c", "--json").stdout)
+        self.assertEqual(disabled_explain["visible"]["layer"], "base")
+        self.assertFalse(disabled_explain.get("hidden", False))
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "edited in buildtree\n")
+        applied = self.run_layer("apply", "common/util.c")
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        applied_status = self.run_layer("-L", "base", "git", "status", "--short")
+        self.assertEqual(applied_status.returncode, 0, applied_status.stderr)
+        self.assertIn("A  common/util.c", applied_status.stdout)
+
+        enabled_top = self.run_layer("enable", "top")
+        self.assertEqual(enabled_top.returncode, 0, enabled_top.stdout + enabled_top.stderr)
+        enabled_explain = json.loads(self.run_layer("explain", "common/util.c", "--json").stdout)
+        self.assertEqual(enabled_explain["visible"]["layer"], "base")
+        self.assertFalse(enabled_explain.get("hidden", False))
+        self.assertEqual([item["layer"] for item in enabled_explain["masked"]], ["top"])
+
+        selected_top = self.run_layer("use", "common/util.c", "top")
+        self.assertEqual(selected_top.returncode, 0, selected_top.stdout + selected_top.stderr)
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "from top\n")
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertEqual(manifest["file_selection"]["common/util.c"], {"layer": "top"})
+
+        disabled_top_again = self.run_layer("disable", "top")
+        self.assertEqual(disabled_top_again.returncode, 0, disabled_top_again.stdout + disabled_top_again.stderr)
+        fallback_explain = json.loads(self.run_layer("explain", "common/util.c", "--json").stdout)
+        self.assertEqual(fallback_explain["visible"]["layer"], "base")
+        self.assertFalse(fallback_explain.get("hidden", False))
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "edited in buildtree\n")
+
+    def test_adopt_no_stage_leaves_new_file_untracked_until_apply(self) -> None:
+        base = self.make_repo("base", {"README.md": "base\n"})
+        top = self.make_repo("top", {"common/util.c": "from top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("edited in buildtree\n")
+
+        adopted = self.run_layer("adopt", "common/util.c", "base", "--no-stage")
+        untracked_status = self.run_layer("-L", "base", "git", "status", "--short")
+        applied = self.run_layer("apply", "common/util.c")
+        staged_status = self.run_layer("-L", "base", "git", "status", "--short")
+
+        self.assertEqual(adopted.returncode, 0, adopted.stdout + adopted.stderr)
+        self.assertIn("Warning: common/util.c is untracked in Git.", adopted.stdout)
+        self.assertIn("?? common/", untracked_status.stdout)
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertIn("Applied new (staged):", applied.stdout)
+        self.assertIn("A  common/util.c", staged_status.stdout)
+
+    def test_adopt_refuses_to_overwrite_different_target_without_force(self) -> None:
+        base = self.make_repo("base", {"common/util.c": "from base\n"})
+        top = self.make_repo("top", {"common/util.c": "from top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+
+        result = self.run_layer("adopt", "common/util.c", "base")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Target layer base already has common/util.c with different content", result.stderr)
+        self.assertIn("--force", result.stderr)
+        self.assertEqual((self.workspace / ".layer" / "cache" / "base" / "common" / "util.c").read_text(), "from base\n")
+
+    def test_adopt_tracked_target_does_not_stage_by_default_but_can_stage(self) -> None:
+        base = self.make_repo("base", {"common/util.c": "from base\n"})
+        top = self.make_repo("top", {"common/util.c": "from top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(base), "base").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+
+        default = self.run_layer("adopt", "common/util.c", "base", "--force")
+        default_status = self.run_layer("-L", "base", "git", "status", "--short")
+        self.assertEqual(default.returncode, 0, default.stdout + default.stderr)
+        self.assertIn("Git did not stage, commit, or push this tracked file.", default.stdout)
+        self.assertIn(" M common/util.c", default_status.stdout)
+
+        staged = self.run_layer("adopt", "common/util.c", "base", "--force", "--stage")
+        staged_status = self.run_layer("-L", "base", "git", "status", "--short")
+        self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+        self.assertIn("Staged common/util.c in base.", staged.stdout)
+        self.assertIn("M  common/util.c", staged_status.stdout)
+
+    def test_use_refuses_to_switch_dirty_buildtree_file(self) -> None:
+        repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
+        repo_c = self.make_repo("repo-c", {"common/util.c": "from c\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_b), "component-b").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(repo_c), "component-c").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("dirty edit\n")
+
+        result = self.run_layer("use", "common/util.c", "component-b")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("common/util.c has unapplied buildtree edits", result.stderr)
+        self.assertIn("layer apply common/util.c", result.stderr)
+        self.assertIn("layer adopt common/util.c component-b", result.stderr)
+        self.assertIn("layer compose", result.stderr)
+        self.assertEqual((self.workspace / "buildtree" / "common" / "util.c").read_text(), "dirty edit\n")
+        manifest = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        self.assertNotIn("file_selection", manifest)
 
     def test_disable_and_enable_layer_recomposes_without_deleting_cache(self) -> None:
         repo_b = self.make_repo("repo-b", {"common/util.c": "from b\n"})
@@ -851,7 +1202,20 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertEqual(base_status.stdout, "")
         self.assertIn("M common/util.c", top_status.stdout)
 
-    def test_invariant_apply_new_writes_only_write_layer_and_does_not_stage(self) -> None:
+    def test_apply_tracked_file_with_stage_stages_it(self) -> None:
+        top = self.make_repo("top", {"common/util.c": "top\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("edited\n")
+
+        result = self.run_layer("apply", "common/util.c", "--stage")
+        git_status = self.run_layer("-L", "top", "git", "status", "--short")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Applied modified (staged):", result.stdout)
+        self.assertIn("M  common/util.c", git_status.stdout)
+
+    def test_invariant_apply_new_writes_only_write_layer_and_stages(self) -> None:
         product = self.make_repo("product", {"src/main.c": "ok\n"})
         self.assertEqual(self.run_layer("init").returncode, 0)
         self.assertEqual(self.run_layer("add", str(product), "product").returncode, 0)
@@ -865,8 +1229,72 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertFalse((self.workspace / ".layer" / "cache" / "product" / "newfile.c").exists())
         write_status = self.run_layer("-L", "workspace-base", "git", "status", "--short")
         product_status = self.run_layer("-L", "product", "git", "status", "--short")
-        self.assertIn("?? newfile.c", write_status.stdout)
+        self.assertIn("A  newfile.c", write_status.stdout)
         self.assertEqual(product_status.stdout, "")
+
+    def test_apply_new_with_no_stage_leaves_file_untracked_and_warns(self) -> None:
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        new_file = self.workspace / "buildtree" / "newfile.c"
+        new_file.write_text("new\n")
+
+        result = self.run_layer("apply", "--new", "--no-stage")
+        git_status = self.run_layer("-L", "workspace-base", "git", "status", "--short")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Applied new (not staged):", result.stdout)
+        self.assertIn("Warning: new files were copied but left untracked in Git.", result.stdout)
+        self.assertIn("?? newfile.c", git_status.stdout)
+
+    def test_apply_all_stages_new_but_not_tracked_modifications_by_default(self) -> None:
+        top = self.make_repo("top", {"common/util.c": "top\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("edited\n")
+        (self.workspace / "buildtree" / "newfile.c").write_text("new\n")
+
+        result = self.run_layer("apply", "--all")
+        top_status = self.run_layer("-L", "top", "git", "status", "--short")
+        base_status = self.run_layer("-L", "workspace-base", "git", "status", "--short")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Applied modified (not staged):", result.stdout)
+        self.assertIn("Applied new (staged):", result.stdout)
+        self.assertIn(" M common/util.c", top_status.stdout)
+        self.assertIn("A  newfile.c", base_status.stdout)
+
+    def test_apply_all_no_stage_stages_nothing(self) -> None:
+        top = self.make_repo("top", {"common/util.c": "top\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("edited\n")
+        (self.workspace / "buildtree" / "newfile.c").write_text("new\n")
+
+        result = self.run_layer("apply", "--all", "--no-stage")
+        top_status = self.run_layer("-L", "top", "git", "status", "--short")
+        base_status = self.run_layer("-L", "workspace-base", "git", "status", "--short")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Applied modified (not staged):", result.stdout)
+        self.assertIn("Applied new (not staged):", result.stdout)
+        self.assertIn(" M common/util.c", top_status.stdout)
+        self.assertIn("?? newfile.c", base_status.stdout)
+
+    def test_apply_all_stage_stages_tracked_modifications_and_new_files(self) -> None:
+        top = self.make_repo("top", {"common/util.c": "top\n"})
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(top), "top").returncode, 0)
+        (self.workspace / "buildtree" / "common" / "util.c").write_text("edited\n")
+        (self.workspace / "buildtree" / "newfile.c").write_text("new\n")
+
+        result = self.run_layer("apply", "--all", "--stage")
+        top_status = self.run_layer("-L", "top", "git", "status", "--short")
+        base_status = self.run_layer("-L", "workspace-base", "git", "status", "--short")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Applied modified (staged):", result.stdout)
+        self.assertIn("Applied new (staged):", result.stdout)
+        self.assertIn("M  common/util.c", top_status.stdout)
+        self.assertIn("A  newfile.c", base_status.stdout)
 
     def test_invariant_apply_rejects_path_traversal_without_writing_outside_cache(self) -> None:
         product = self.make_repo("product", {"src/main.c": "ok\n"})
@@ -1015,7 +1443,22 @@ class LayerGitCliTest(unittest.TestCase):
             (self.workspace / ".layer" / "cache" / "workspace-base" / "generated" / "config.h").read_text(),
             "#define X 1\n",
         )
-        self.assertIn("?? generated/", git_status.stdout)
+        self.assertIn("A  generated/config.h", git_status.stdout)
+
+    def test_apply_new_file_initializes_local_layer_cache_before_staging(self) -> None:
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        local_git = self.workspace / ".layer" / "cache" / "workspace-base" / ".git"
+        shutil.rmtree(local_git)
+        new_file = self.workspace / "buildtree" / ".gitignore"
+        new_file.write_text("local\n")
+
+        result = self.run_layer("apply", ".gitignore")
+        git_status = self.run_layer("-L", "workspace-base", "git", "status", "--short")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(local_git.exists())
+        self.assertEqual((self.workspace / ".layer" / "cache" / "workspace-base" / ".gitignore").read_text(), "local\n")
+        self.assertIn("A  .gitignore", git_status.stdout)
 
     def test_apply_new_file_requires_write_layer(self) -> None:
         self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
@@ -1287,14 +1730,31 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertEqual({view["id"] for view in views}, {"layergit.layers", "layergit.composedTree"})
         self.assertIn("layergit.refresh", commands)
         self.assertIn("layergit.init", commands)
+        self.assertIn("layergit.addLayer", commands)
         self.assertIn("layergit.addLocalLayer", commands)
+        self.assertIn("layergit.compose", commands)
+        self.assertIn("layergit.openOutput", commands)
         self.assertIn("layergit.setWriteLayer", commands)
+        self.assertIn("layergit.openLayerCache", commands)
+        self.assertIn("layergit.gitStatusLayer", commands)
+        self.assertIn("layergit.applyLayer", commands)
+        self.assertIn("layergit.applyAll", commands)
+        self.assertIn("layergit.clearSelection", commands)
         self.assertIn("layergit.explainCurrentFile", commands)
         self.assertIn("layergit.moveLayerUp", commands)
         self.assertIn("layergit.moveLayerDown", commands)
         self.assertIn("layergit.sendLayerToTop", commands)
         self.assertIn("layergit.sendLayerToBottom", commands)
         self.assertIn("layergit.useLayerForFile", commands)
+        self.assertIn("layergit.applyFile", commands)
+        title_menus = package["contributes"]["menus"]["view/title"]
+        add_menu = next(item for item in title_menus if item["command"] == "layergit.addLayer")
+        init_menu = next(item for item in title_menus if item["command"] == "layergit.init")
+        self.assertIn("layergit.workspaceFound", add_menu["when"])
+        self.assertIn("!layergit.workspaceFound", init_menu["when"])
+        item_menus = package["contributes"]["menus"]["view/item/context"]
+        apply_layer_menu = next(item for item in item_menus if item["command"] == "layergit.applyLayer")
+        self.assertIn("viewItem =~ /layergit\\.layer\\./", apply_layer_menu["when"])
         self.assertTrue((ROOT / "vscode-extension" / "src" / "cli.ts").exists())
         self.assertTrue((ROOT / "vscode-extension" / "src" / "layersView.ts").exists())
         self.assertTrue((ROOT / "vscode-extension" / "src" / "composedTreeView.ts").exists())

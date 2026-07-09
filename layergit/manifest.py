@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from pathlib import PurePosixPath
+import re
 from typing import Any
 
 import yaml
@@ -45,6 +47,7 @@ def load_manifest(root: Path) -> dict[str, Any]:
     for layer in data["layers"]:
         layer.setdefault("enabled", True)
         layer.setdefault("kind", "git" if layer.get("repo") else "local")
+        layer["mount"] = normalize_mount(layer.get("mount"))
     return data
 
 
@@ -79,3 +82,74 @@ def conflicts_path(root: Path) -> Path:
 
 def lockfile_path(root: Path) -> Path:
     return root / LOCKFILE
+
+
+def normalize_mount(value: Any) -> str:
+    if value is None:
+        return "/"
+    mount = str(value).strip()
+    if mount in ("", ".", "/"):
+        return "/"
+    if re.match(r"^[A-Za-z]:", mount):
+        raise LayerError(f"Invalid layer mount `{value}`: Windows drive paths are not allowed")
+    if "\\" in mount:
+        raise LayerError(f"Invalid layer mount `{value}`: use forward slashes")
+
+    mount = re.sub(r"/+", "/", mount)
+    if mount.startswith("/"):
+        parts = [part for part in mount.split("/") if part]
+        if parts and parts[0] in filesystem_root_names():
+            raise LayerError(f"Invalid layer mount `{value}`: filesystem absolute paths are not allowed")
+    else:
+        parts = [part for part in mount.split("/") if part]
+
+    if any(part == ".." for part in parts):
+        raise LayerError(f"Invalid layer mount `{value}`: path traversal is not allowed")
+    parts = [part for part in parts if part != "."]
+    if not parts:
+        return "/"
+    normalized = PurePosixPath(*parts).as_posix()
+    return f"/{normalized}"
+
+
+def filesystem_root_names() -> set[str]:
+    return {
+        "bin",
+        "boot",
+        "dev",
+        "etc",
+        "home",
+        "lib",
+        "lib64",
+        "mnt",
+        "opt",
+        "proc",
+        "root",
+        "run",
+        "sbin",
+        "srv",
+        "sys",
+        "tmp",
+        "usr",
+        "var",
+    }
+
+
+def buildtree_path_for_source(source_path: str, mount: str) -> str:
+    mount = normalize_mount(mount)
+    if mount == "/":
+        return PurePosixPath(source_path).as_posix()
+    return PurePosixPath(mount.lstrip("/"), source_path).as_posix()
+
+
+def source_path_for_buildtree(buildtree_path: str, mount: str) -> str | None:
+    mount = normalize_mount(mount)
+    rel_path = PurePosixPath(buildtree_path).as_posix()
+    if mount == "/":
+        return rel_path
+    prefix = mount.lstrip("/")
+    if rel_path == prefix:
+        return None
+    if rel_path.startswith(prefix + "/"):
+        return rel_path[len(prefix) + 1 :]
+    return None

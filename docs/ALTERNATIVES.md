@@ -54,6 +54,8 @@ not deleted, and LayerGit records visible and masked provenance.
 `layer explain <path>` shows which layer provided the visible file, and
 `layer use <path> <layer>` can override the default provider for one path.
 `layer overlaps` lists paths currently provided by more than one enabled layer.
+Because the composed tree is generated, LayerGit can also mount whole layer
+repos under buildtree subfolders while keeping the source repos isolated.
 
 ## Closest Related Tools
 
