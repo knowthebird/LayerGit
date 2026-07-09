@@ -787,6 +787,26 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertIn("--force", result.stderr)
         self.assertEqual((self.workspace / ".layer" / "cache" / "base" / "common" / "util.c").read_text(), "from base\n")
 
+    def test_adopt_rejects_missing_directory_and_directory_target(self) -> None:
+        self.assertEqual(self.run_layer("init").returncode, 0)
+        missing = self.run_layer("adopt", "missing.c", "workspace-base")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("does not exist in buildtree", missing.stderr)
+
+        buildtree_dir = self.workspace / "buildtree" / "dir"
+        buildtree_dir.mkdir()
+        directory_source = self.run_layer("adopt", "dir", "workspace-base")
+        self.assertNotEqual(directory_source.returncode, 0)
+        self.assertIn("is not a file", directory_source.stderr)
+
+        buildtree_file = self.workspace / "buildtree" / "target-dir"
+        buildtree_file.write_text("file\n")
+        (self.workspace / ".layer" / "cache" / "workspace-base" / "target-dir").mkdir()
+        directory_target = self.run_layer("adopt", "target-dir", "workspace-base")
+        self.assertNotEqual(directory_target.returncode, 0)
+        self.assertIn("target path", directory_target.stderr)
+        self.assertIn("is not a file", directory_target.stderr)
+
     def test_adopt_tracked_target_does_not_stage_by_default_but_can_stage(self) -> None:
         base = self.make_repo("base", {"common/util.c": "from base\n"})
         top = self.make_repo("top", {"common/util.c": "from top\n"})
@@ -1490,6 +1510,50 @@ class LayerGitCliTest(unittest.TestCase):
         deleted = self.run_layer("apply", "--delete", "old/file.c")
         self.assertEqual(deleted.returncode, 0, deleted.stdout + deleted.stderr)
         self.assertFalse((self.workspace / ".layer" / "cache" / "component-b" / "old" / "file.c").exists())
+        self.assertIn("Applied deleted (staged):", deleted.stdout)
+        self.assertIn("Masked copies in lower layers were not deleted.", deleted.stdout)
+        git_status = self.run_layer("-L", "component-b", "git", "status", "--short")
+        self.assertEqual(git_status.returncode, 0, git_status.stderr)
+        self.assertIn("D  old/file.c", git_status.stdout)
+
+    def test_apply_delete_no_stage_leaves_delete_unstaged_and_warns(self) -> None:
+        product = self.make_repo("repo-a", {"old/file.c": "old\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "component-b").returncode, 0)
+        (self.workspace / "buildtree" / "old" / "file.c").unlink()
+
+        deleted = self.run_layer("apply", "--delete", "old/file.c", "--no-stage")
+
+        self.assertEqual(deleted.returncode, 0, deleted.stdout + deleted.stderr)
+        self.assertIn("Applied deleted (not staged):", deleted.stdout)
+        self.assertIn("Warning: deletions were not staged.", deleted.stdout)
+        self.assertIn("layer -L component-b git add -u old/file.c", deleted.stdout)
+        git_status = self.run_layer("-L", "component-b", "git", "status", "--short")
+        self.assertEqual(git_status.returncode, 0, git_status.stderr)
+        self.assertIn(" D old/file.c", git_status.stdout)
+
+    def test_apply_delete_rejects_existing_hidden_and_unowned_paths(self) -> None:
+        product = self.make_repo("repo-a", {"common/util.c": "old\n"})
+        self.assertEqual(self.run_layer("init", "--no-base-layer").returncode, 0)
+        self.assertEqual(self.run_layer("add", str(product), "component-b").returncode, 0)
+
+        existing = self.run_layer("apply", "--delete", "common/util.c")
+        self.assertNotEqual(existing.returncode, 0)
+        self.assertIn("buildtree/common/util.c still exists", existing.stderr)
+
+        self.assertEqual(self.run_layer("add", "--local", "mask").returncode, 0)
+        hidden = self.run_layer("use", "common/util.c", "mask", "--hide")
+        self.assertEqual(hidden.returncode, 0, hidden.stdout + hidden.stderr)
+        delete_hidden = self.run_layer("apply", "--delete", "common/util.c")
+        self.assertNotEqual(delete_hidden.returncode, 0)
+        self.assertIn("Cannot apply delete for common/util.c because it is hidden by selection", delete_hidden.stderr)
+        self.assertIn("layer unuse common/util.c", delete_hidden.stderr)
+
+        unowned_path = self.workspace / "buildtree" / "local.txt"
+        unowned_path.write_text("local\n")
+        delete_unowned = self.run_layer("apply", "--delete", "local.txt")
+        self.assertNotEqual(delete_unowned.returncode, 0)
+        self.assertIn("Cannot apply delete for local.txt because it is not owned by LayerGit", delete_unowned.stderr)
 
     def test_cli_validation_edges_for_init_add_apply_and_git(self) -> None:
         product = self.make_repo("repo-a", {"src/main.c": "ok\n"})
@@ -1505,6 +1569,7 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertIn("Use `layer add --local <name>`", self.run_layer("add", "--local").stderr)
         self.assertIn("Use `layer add --local <name>`", self.run_layer("add", "--local", "a", "b").stderr)
         self.assertIn("--revision is only valid", self.run_layer("add", "--local", "local-rev", "--revision", "main").stderr)
+        self.assertIn("apply --delete requires a path", self.run_layer("apply", "--delete", "--all").stderr)
 
         first = self.run_layer("add", str(product), "product", "--no-compose")
         duplicate = self.run_layer("add", str(product), "product")
@@ -1577,6 +1642,11 @@ class LayerGitCliTest(unittest.TestCase):
         manifest_data.setdefault("file_precedence", {})["common/util.c"] = {"order": ["b"]}
         (self.workspace / "layer.yaml").write_text(yaml.safe_dump(manifest_data, sort_keys=False))
         self.assertEqual(self.run_layer("unuse", "common/util.c").returncode, 0)
+        self.assertNotIn("file_precedence", yaml.safe_load((self.workspace / "layer.yaml").read_text()))
+        manifest_data = yaml.safe_load((self.workspace / "layer.yaml").read_text())
+        manifest_data.setdefault("file_precedence", {})["common/util.c"] = {"order": ["a"]}
+        (self.workspace / "layer.yaml").write_text(yaml.safe_dump(manifest_data, sort_keys=False))
+        self.assertEqual(self.run_layer("use", "common/util.c", "b").returncode, 0)
         self.assertNotIn("file_precedence", yaml.safe_load((self.workspace / "layer.yaml").read_text()))
         self.assertEqual(self.run_layer("help").returncode, 0)
         self.assertIn("not a layer command", self.run_layer("help", "missing").stderr)
@@ -1739,6 +1809,9 @@ class LayerGitCliTest(unittest.TestCase):
         self.assertIn("layergit.gitStatusLayer", commands)
         self.assertIn("layergit.applyLayer", commands)
         self.assertIn("layergit.applyAll", commands)
+        self.assertIn("layergit.newFile", commands)
+        self.assertIn("layergit.adoptFile", commands)
+        self.assertIn("layergit.deleteFile", commands)
         self.assertIn("layergit.clearSelection", commands)
         self.assertIn("layergit.explainCurrentFile", commands)
         self.assertIn("layergit.moveLayerUp", commands)
@@ -1755,6 +1828,10 @@ class LayerGitCliTest(unittest.TestCase):
         item_menus = package["contributes"]["menus"]["view/item/context"]
         apply_layer_menu = next(item for item in item_menus if item["command"] == "layergit.applyLayer")
         self.assertIn("viewItem =~ /layergit\\.layer\\./", apply_layer_menu["when"])
+        adopt_file_menu = next(item for item in item_menus if item["command"] == "layergit.adoptFile")
+        delete_file_menu = next(item for item in item_menus if item["command"] == "layergit.deleteFile")
+        self.assertIn("view == layergit.composedTree", adopt_file_menu["when"])
+        self.assertIn("view == layergit.composedTree", delete_file_menu["when"])
         self.assertTrue((ROOT / "vscode-extension" / "src" / "cli.ts").exists())
         self.assertTrue((ROOT / "vscode-extension" / "src" / "layersView.ts").exists())
         self.assertTrue((ROOT / "vscode-extension" / "src" / "composedTreeView.ts").exists())

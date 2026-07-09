@@ -46,6 +46,7 @@ export class ComposedTreeProvider implements vscode.TreeDataProvider<Node> {
       const stale = tree.files.some((file) => file.ownership === 'stale');
       const actions = [
         new ActionNode('Compose / Refresh Tree', 'layergit.compose', 'sync'),
+        new ActionNode('New File...', 'layergit.newFile', 'new-file'),
         new ActionNode('Apply All Changes', 'layergit.applyAll', 'check'),
       ];
       if (!this.roots.length) {

@@ -128,6 +128,15 @@ export function registerCommands(
     vscode.commands.registerCommand('layergit.applyFile', async (node?: FileNode, selected?: FileNode[]) => {
       await applyFile(cli, node, selected, refresh);
     }),
+    vscode.commands.registerCommand('layergit.adoptFile', async (node?: FileNode, selected?: FileNode[]) => {
+      await adoptFile(cli, node, selected, refresh);
+    }),
+    vscode.commands.registerCommand('layergit.deleteFile', async (node?: FileNode, selected?: FileNode[]) => {
+      await deleteFile(cli, node, selected, refresh);
+    }),
+    vscode.commands.registerCommand('layergit.newFile', async () => {
+      await createNewFile(cli, refresh);
+    }),
     vscode.commands.registerCommand('layergit.clearSelection', async (node?: FileNode, selected?: FileNode[]) => {
       await clearSelection(cli, node, selected, refresh);
     })
@@ -531,6 +540,241 @@ async function applyFile(
   showBatchResult('Applied buildtree changes', succeeded, files.length);
 }
 
+async function adoptFile(
+  cli: LayerGitCli,
+  node: FileNode | undefined,
+  selected: FileNode[] | undefined,
+  refresh: () => void
+): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  const files = selectedFileNodes(node, selected);
+  if (!workspace || !files.length) {
+    return;
+  }
+  const layerName = await pickLayerName(cli, workspace, files.length === 1 ? `Adopt ${files[0].file.path} into Layer` : `Adopt ${files.length} files into Layer`);
+  if (!layerName) {
+    return;
+  }
+  let succeeded = 0;
+  for (const file of files) {
+    const args = ['adopt', file.file.path, layerName];
+    if (layerProvidesFile(file.file, layerName)) {
+      const confirmed = await vscode.window.showWarningMessage(
+        `Layer ${layerName} already provides ${file.file.path}. Adopt will overwrite that layer's copy with the current buildtree file.`,
+        { modal: true },
+        'Overwrite Layer Copy'
+      );
+      if (confirmed !== 'Overwrite Layer Copy') {
+        continue;
+      }
+      args.push('--force');
+    }
+    if (await runCliActionWithoutRefresh(cli, workspace, args)) {
+      succeeded += 1;
+    }
+  }
+  refresh();
+  showBatchResult('Adopted into layer', succeeded, files.length);
+}
+
+async function deleteFile(
+  cli: LayerGitCli,
+  node: FileNode | undefined,
+  selected: FileNode[] | undefined,
+  refresh: () => void
+): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  const files = selectedFileNodes(node, selected);
+  if (!workspace || !files.length) {
+    return;
+  }
+  let succeeded = 0;
+  for (const file of files) {
+    if (await deleteOneFile(cli, workspace, file, refresh)) {
+      succeeded += 1;
+    }
+  }
+  if (files.length > 1) {
+    refresh();
+    showBatchResult('Handled delete action', succeeded, files.length);
+  }
+}
+
+async function deleteOneFile(
+  cli: LayerGitCli,
+  workspace: vscode.Uri,
+  node: FileNode,
+  refresh: () => void
+): Promise<boolean> {
+  const status = await cli.status(workspace);
+  const filePath = node.file.path;
+  if (hasModifiedFile(status, filePath)) {
+    const handled = await handleDirtyFileBeforeDelete(cli, workspace, filePath, refresh);
+    if (!handled) {
+      return false;
+    }
+  }
+  if (node.file.hidden) {
+    const choice = await vscode.window.showWarningMessage(
+      `${filePath} is hidden by layer selection. Source delete is not offered for hidden files.`,
+      { modal: true },
+      'Clear Selection',
+      'Use Provider...',
+      'Explain'
+    );
+    if (choice === 'Clear Selection') {
+      return runCliAction(cli, workspace, ['unuse', filePath], refresh);
+    }
+    if (choice === 'Use Provider...') {
+      await useLayerForFile(cli, node, undefined, refresh);
+      return true;
+    }
+    if (choice === 'Explain') {
+      await explain(cli, workspace, filePath);
+      return true;
+    }
+    return false;
+  }
+  if (node.file.ownership === 'untracked' || !node.file.owned) {
+    const choice = await vscode.window.showWarningMessage(
+      `${filePath} is not owned by LayerGit. Deleting it will only remove the local buildtree file.`,
+      { modal: true },
+      'Delete Local Buildtree File',
+      'Adopt into Layer...'
+    );
+    if (choice === 'Delete Local Buildtree File') {
+      await deleteBuildtreeFile(node.uri);
+      refresh();
+      return true;
+    }
+    if (choice === 'Adopt into Layer...') {
+      await adoptFile(cli, node, undefined, refresh);
+      return true;
+    }
+    return false;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    `Delete ${filePath}?\n\nChoose what LayerGit should do.`,
+    { modal: true },
+    'Hide Inherited File',
+    'Delete from Owning Layer',
+    'Delete Generated Copy Only'
+  );
+  if (choice === 'Hide Inherited File') {
+    const layerName = await pickNonProviderLayerName(cli, workspace, node);
+    if (!layerName) {
+      return false;
+    }
+    return runCliAction(cli, workspace, ['use', filePath, layerName, '--hide'], refresh);
+  }
+  if (choice === 'Delete Generated Copy Only') {
+    const confirmed = await vscode.window.showWarningMessage(
+      `This only removes the generated buildtree copy of ${filePath}. The file may reappear after layer compose unless it is hidden or deleted from its source layer.`,
+      { modal: true },
+      'Delete Generated Copy'
+    );
+    if (confirmed !== 'Delete Generated Copy') {
+      return false;
+    }
+    await deleteBuildtreeFile(node.uri);
+    refresh();
+    return true;
+  }
+  if (choice === 'Delete from Owning Layer') {
+    const owner = node.file.visibleLayer ?? 'unknown';
+    const confirmed = await vscode.window.showWarningMessage(
+      `This will delete ${filePath} from layer ${owner}.\n\nMasked providers will remain untouched.`,
+      { modal: true },
+      `Delete from ${owner}`
+    );
+    if (confirmed !== `Delete from ${owner}`) {
+      return false;
+    }
+    await deleteBuildtreeFile(node.uri);
+    return runCliAction(cli, workspace, ['apply', '--delete', filePath], refresh);
+  }
+  return false;
+}
+
+async function handleDirtyFileBeforeDelete(
+  cli: LayerGitCli,
+  workspace: vscode.Uri,
+  filePath: string,
+  refresh: () => void
+): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    `${filePath} has unapplied buildtree edits. What should LayerGit do before deleting or hiding it?`,
+    { modal: true },
+    'Apply to Current Layer',
+    'Adopt into Selected Layer',
+    'Discard/regenerate',
+    'Cancel'
+  );
+  if (choice === 'Apply to Current Layer') {
+    return runCliAction(cli, workspace, ['apply', filePath], refresh);
+  }
+  if (choice === 'Adopt into Selected Layer') {
+    const layerName = await pickLayerName(cli, workspace, `Adopt ${filePath} into Layer`);
+    if (layerName) {
+      await runCliAction(cli, workspace, ['adopt', filePath, layerName], refresh);
+    }
+    return false;
+  }
+  if (choice === 'Discard/regenerate') {
+    return runCliAction(cli, workspace, ['compose'], refresh);
+  }
+  return false;
+}
+
+async function createNewFile(cli: LayerGitCli, refresh: () => void): Promise<void> {
+  const workspace = await requireLayerGitWorkspace();
+  if (!workspace) {
+    return;
+  }
+  const status = await cli.status(workspace);
+  const requestedPath = await vscode.window.showInputBox({
+    title: 'Create new LayerGit file',
+    prompt: 'Path relative to buildtree/',
+    validateInput: validateRelativeBuildtreePath,
+  });
+  if (!requestedPath) {
+    return;
+  }
+  const filePath = requestedPath.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  const layerName = await pickLayerName(cli, workspace, `Target layer for ${filePath}`);
+  if (!layerName) {
+    return;
+  }
+  const layer = status.layers.find((item) => item.name === layerName);
+  const mountError = layer ? validatePathUnderLayerMount(filePath, layer.mount ?? '/') : undefined;
+  if (mountError) {
+    vscode.window.showErrorMessage(mountError);
+    return;
+  }
+  const uri = joinWorkspacePath(workspace, status.output, filePath);
+  if (await uriExists(uri)) {
+    vscode.window.showWarningMessage(`${filePath} already exists in buildtree/.`);
+    return;
+  }
+  await vscode.workspace.fs.createDirectory(parentUri(uri));
+  await vscode.workspace.fs.writeFile(uri, new Uint8Array());
+  const document = await vscode.workspace.openTextDocument(uri);
+  await vscode.window.showTextDocument(document);
+
+  const choice = await vscode.window.showInformationMessage(
+    `Created ${filePath} in buildtree. Adopt this file into layer ${layerName}?`,
+    { modal: true },
+    'Adopt and stage',
+    'Keep as unowned buildtree file'
+  );
+  if (choice === 'Adopt and stage') {
+    await runCliAction(cli, workspace, ['adopt', filePath, layerName], refresh);
+    return;
+  }
+  refresh();
+}
+
 async function clearSelection(
   cli: LayerGitCli,
   node: FileNode | undefined,
@@ -622,6 +866,84 @@ function selectedFileNodes(node: FileNode | undefined, selected: FileNode[] | un
     byPath.set(file.file.path, file);
   }
   return [...byPath.values()];
+}
+
+async function pickNonProviderLayerName(
+  cli: LayerGitCli,
+  workspace: vscode.Uri,
+  node: FileNode
+): Promise<string | undefined> {
+  const status = await cli.status(workspace);
+  const candidates = status.layers.filter((layer) => layer.enabled && !layerProvidesFile(node.file, layer.name));
+  if (!candidates.length) {
+    vscode.window.showWarningMessage(`No enabled layer is available to hide ${node.file.path}.`);
+    return undefined;
+  }
+  const picked = await vscode.window.showQuickPick(
+    candidates.map((layer) => ({
+      label: layer.name,
+      description: layerDescription(layer, status.write_layer === layer.name),
+      detail: layer.repo,
+      layer,
+    })),
+    {
+      title: `Hide ${node.file.path} by assigning a non-provider layer`,
+      placeHolder: 'Select the layer to record the hide selection',
+    }
+  );
+  return picked?.layer.name;
+}
+
+function validateRelativeBuildtreePath(value: string): string | undefined {
+  const normalized = value.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!normalized) {
+    return 'Path is required.';
+  }
+  if (normalized.startsWith('/') || normalized.split('/').includes('..')) {
+    return 'Use a relative path inside buildtree/.';
+  }
+  if (normalized.endsWith('/')) {
+    return 'Create files, not directories.';
+  }
+  return undefined;
+}
+
+function validatePathUnderLayerMount(filePath: string, mount: string): string | undefined {
+  const normalizedMount = mount === '/' ? '' : mount.replace(/^\/+|\/+$/g, '');
+  if (!normalizedMount) {
+    return undefined;
+  }
+  if (filePath === normalizedMount || filePath.startsWith(`${normalizedMount}/`)) {
+    return undefined;
+  }
+  return `Cannot create ${filePath} in layer mounted at /${normalizedMount}. Choose a path under /${normalizedMount} or select a different layer.`;
+}
+
+function joinWorkspacePath(workspace: vscode.Uri, ...relativeParts: string[]): vscode.Uri {
+  const segments = relativeParts
+    .flatMap((part) => part.replace(/^\.\//, '').split(/[\\/]+/))
+    .filter(Boolean);
+  return vscode.Uri.joinPath(workspace, ...segments);
+}
+
+function parentUri(uri: vscode.Uri): vscode.Uri {
+  const parts = uri.path.split('/');
+  return uri.with({ path: parts.slice(0, -1).join('/') || '/' });
+}
+
+async function uriExists(uri: vscode.Uri): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(uri);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteBuildtreeFile(uri: vscode.Uri): Promise<void> {
+  if (await uriExists(uri)) {
+    await vscode.workspace.fs.delete(uri);
+  }
 }
 
 function providerLines(

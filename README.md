@@ -203,6 +203,7 @@ LayerGit writes supporting metadata:
 | `layer diff`                  | Show `buildtree/` changes that can be applied        |
 | `layer apply <path>`          | Apply one edited file back to its owning layer       |
 | `layer apply <path> --stage`  | Apply and stage an edited tracked file               |
+| `layer apply --delete <path>` | Delete a missing buildtree file from its owning layer and stage the deletion |
 | `layer apply --new`           | Apply new unowned files to the write layer           |
 | `layer apply --new --no-stage` | Apply new files without staging them                |
 | `layer -L <layer> git status` | Run Git inside a layer cache repo                    |
@@ -217,6 +218,7 @@ layer use common/util.c board-support --hide
 layer adopt common/util.c board-support
 layer diff common/util.c
 layer apply common/util.c
+layer apply --delete common/util.c
 layer -L component-b git status
 ```
 
@@ -281,6 +283,19 @@ LayerGit copies the file into `.layer/cache/board-support/` and updates
 so Git treats it as a normal provider. Use `--no-stage` to leave it untracked.
 For mounted layers, the destination source path is derived from the mount. A
 file outside the target layer's mount is rejected.
+
+### Applying source deletes
+
+Deleting a file from `buildtree/` is not automatically a source delete. To
+apply that deletion to the current visible owner, run:
+
+```bash
+layer apply --delete common/util.c
+```
+
+LayerGit deletes only the owning layer's source file and stages the deletion.
+Masked copies in lower layers are not removed. Use `--no-stage` only when you
+want the source deletion left as an unstaged Git change.
 
 ### Local layers and write layer
 
@@ -376,6 +391,7 @@ The VS Code extension provides a thin GUI over the LayerGit CLI:
 - write-layer selection through `layer write`
 - file and folder provider selection through `layer use`
 
+TODO: Update gif
 ![LayerGit VS Code extension example](docs/vs-code-example.gif)
 
 Run it locally:

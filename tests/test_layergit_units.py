@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from layergit import cli, composer, exporter, gitops, manifest, merger, reports, selectors, worktree
@@ -68,6 +69,10 @@ class LayerGitUnitTest(unittest.TestCase):
 
         with patch("layergit.gitops.run_git") as run_git:
             run_git.return_value = subprocess.CompletedProcess([], 1, "", "")
+            self.assertFalse(gitops.is_git_repo(self.root))
+
+        with patch("layergit.gitops.run_git") as run_git, patch.object(Path, "resolve", side_effect=OSError):
+            run_git.return_value = subprocess.CompletedProcess([], 0, f"{self.root}\n", "")
             self.assertFalse(gitops.is_git_repo(self.root))
 
         with patch("layergit.gitops.run_git") as run_git:
@@ -330,6 +335,12 @@ class LayerGitUnitTest(unittest.TestCase):
         self.assertEqual(reports.overlap_reason(None), "top-layer-wins")
         stale_overlaps = reports.format_overlaps({"stale": True, "overlaps": []})
         self.assertIn("WARNING: ownership metadata may be stale", stale_overlaps)
+        with patch("layergit.reports.current_ownership", return_value={"hiddenless.c": {"visible": None, "masked": [{"layer": "base"}]}}), patch(
+            "layergit.reports.workspace_status",
+            return_value={"composed_tree": {"stale_owned_files": 0}},
+        ):
+            hiddenless_overlap = reports.overlap_report(self.root, {"layers": [{"name": "base"}]})
+        self.assertEqual(hiddenless_overlap["overlaps"], [])
 
         self.assertEqual(reports.layer_position(2, [1, 2, 3]), None)
         self.assertEqual(reports.iter_output_files(self.root / "missing"), [])
@@ -405,6 +416,17 @@ class LayerGitUnitTest(unittest.TestCase):
                 },
             ),
         )
+        none_visible = reports.format_explain(
+            "selected.c",
+            {
+                "visible": None,
+                "selected_layer": "base",
+                "masked": [{"layer": "lower", "source_path": "selected.c"}],
+                "reason": "selected provider is unavailable",
+            },
+        )
+        self.assertIn("Selected layer:", none_visible)
+        self.assertIn("Masked providers:", none_visible)
         self.assertIn(
             "Masked lower-layer files",
             reports.format_explain(
@@ -444,9 +466,105 @@ class LayerGitUnitTest(unittest.TestCase):
         )
         self.assertEqual(result["new"], [item])
         self.assertFalse((self.root / ".layer" / "cache" / "local" / "new.c").exists())
+        hidden_result = worktree.apply_buildtree_changes(
+            self.root,
+            {"workspace": {"write_layer": "local"}},
+            {"modified": [], "new": [], "deleted": [], "hidden": [{"path": "hidden.c", "selected_layer": "mask"}]},
+            dry_run=True,
+        )
+        self.assertEqual(hidden_result["skipped_hidden"], [{"path": "hidden.c", "selected_layer": "mask"}])
+        worktree.stage_layer_file(self.root, {}, {"path": "missing.c"}, dry_run=False)
+        with patch("layergit.worktree.is_git_repo", return_value=True), patch("layergit.worktree.run_git") as run_git:
+            run_git.return_value = subprocess.CompletedProcess(["git"], 1, "", "fatal: no pathspec\n")
+            with self.assertRaisesRegex(LayerError, "staging failed"):
+                worktree.stage_layer_file(
+                    self.root,
+                    {"layers": [{"name": "gitlayer", "kind": "git"}]},
+                    {"path": "file.c", "layer": "gitlayer", "source_path": "file.c"},
+                    dry_run=False,
+                )
+        with patch("layergit.worktree.is_git_repo", return_value=False):
+            with self.assertRaisesRegex(LayerError, "not a Git repository"):
+                worktree.stage_layer_file(
+                    self.root,
+                    {"layers": [{"name": "gitlayer", "kind": "git"}]},
+                    {"path": "file.c", "layer": "gitlayer", "source_path": "file.c"},
+                    dry_run=False,
+                )
+        with self.assertRaisesRegex(LayerError, "ownership metadata is stale"):
+            worktree.delete_from_layer(self.root, {"layers": []}, {"path": "bad.c", "layer": "owner"}, dry_run=False, stage=True)
+        with self.assertRaisesRegex(LayerError, "ownership metadata is stale"):
+            worktree.delete_from_layer(
+                self.root,
+                {"layers": []},
+                {"path": "bad.c", "layer": "owner", "source_path": "../bad.c"},
+                dry_run=False,
+                stage=True,
+            )
+        with patch("layergit.worktree.is_git_repo", return_value=False):
+            with self.assertRaisesRegex(LayerError, "not a Git repository"):
+                worktree.delete_from_layer(
+                    self.root,
+                    {"layers": [{"name": "owner", "kind": "git"}]},
+                    {"path": "bad.c", "layer": "owner", "source_path": "bad.c"},
+                    dry_run=False,
+                    stage=True,
+                )
+        with patch("layergit.worktree.is_git_repo", return_value=True):
+            with self.assertRaisesRegex(LayerError, "ownership metadata is stale"):
+                worktree.delete_from_layer(
+                    self.root,
+                    {"layers": [{"name": "owner", "kind": "git"}]},
+                    {"path": "missing.c", "layer": "owner", "source_path": "missing.c"},
+                    dry_run=False,
+                    stage=True,
+                )
+        delete_cache = gitops.layer_cache_path(self.root, "owner")
+        delete_cache.mkdir(parents=True, exist_ok=True)
+        (delete_cache / "dry.c").write_text("dry\n")
+        with patch("layergit.worktree.is_git_repo", return_value=True):
+            worktree.delete_from_layer(
+                self.root,
+                {"layers": [{"name": "owner", "kind": "git"}]},
+                {"path": "dry.c", "layer": "owner", "source_path": "dry.c"},
+                dry_run=True,
+                stage=True,
+            )
+        self.assertTrue((delete_cache / "dry.c").exists())
+        local_cache = gitops.layer_cache_path(self.root, "local")
+        local_cache.mkdir(parents=True)
+        (local_cache / "local.c").write_text("local\n")
+        with patch("layergit.worktree.ensure_local_layer_repo", return_value=local_cache):
+            worktree.delete_from_layer(
+                self.root,
+                {"layers": [{"name": "local", "kind": "local"}]},
+                {"path": "local.c", "layer": "local", "source_path": "local.c"},
+                dry_run=True,
+                stage=True,
+            )
+        with patch("layergit.worktree.is_git_repo", return_value=True), patch.object(Path, "relative_to", side_effect=ValueError):
+            with self.assertRaisesRegex(LayerError, "ownership metadata is stale"):
+                worktree.delete_from_layer(
+                    self.root,
+                    {"layers": [{"name": "owner", "kind": "git"}]},
+                    {"path": "dry.c", "layer": "owner", "source_path": "dry.c"},
+                    dry_run=True,
+                    stage=True,
+                )
+        with patch("layergit.worktree.is_git_repo", return_value=True), patch("layergit.worktree.run_git") as run_git:
+            run_git.return_value = subprocess.CompletedProcess(["git"], 1, "", "fatal: no pathspec\n")
+            with self.assertRaisesRegex(LayerError, "Deleted fail.c from layer owner, but staging failed"):
+                (delete_cache / "fail.c").write_text("fail\n")
+                worktree.delete_from_layer(
+                    self.root,
+                    {"layers": [{"name": "owner", "kind": "git"}]},
+                    {"path": "fail.c", "layer": "owner", "source_path": "fail.c"},
+                    dry_run=False,
+                    stage=True,
+                )
 
         ownership_file = self.root / ".layer" / "ownership.json"
-        ownership_file.parent.mkdir(parents=True)
+        ownership_file.parent.mkdir(parents=True, exist_ok=True)
         ownership_file.write_text(
             json.dumps(
                 {
@@ -458,7 +576,7 @@ class LayerGitUnitTest(unittest.TestCase):
             )
         )
         owner_cache = gitops.layer_cache_path(self.root, "owner")
-        owner_cache.mkdir(parents=True)
+        owner_cache.mkdir(parents=True, exist_ok=True)
         (owner_cache / "owned.c").write_text("old\n")
         (output / "owned.c").write_text("new\n")
         (output / "skip-hidden.c").write_text("hidden\n")
@@ -501,6 +619,39 @@ class LayerGitUnitTest(unittest.TestCase):
         (blocked / "child.txt").write_text("child\n")
         worktree.remove_empty_parents(blocked, gitops.layer_cache_path(self.root, "owner"))
         self.assertTrue(blocked.exists())
+
+    def test_composer_adopted_provider_edge_cases(self) -> None:
+        self.assertEqual(
+            composer.iter_adopted_file_layers(
+                {"file_selection": {"bad.c": {"adopted": True, "layer": 123}, "skip.c": {"layer": "base"}}}
+            ),
+            [],
+        )
+        enabled_layers = [
+            (1, {"name": "base", "mount": "/"}),
+            (2, {"name": "app", "mount": "/app"}),
+            (3, {"name": "missing", "mount": "/"}),
+            (4, {"name": "excluded", "mount": "/", "exclude": ["excluded.c"]}),
+        ]
+        manifest_data = {
+            "file_selection": {
+                "disabled.c": {"layer": "disabled", "adopted": True},
+                "docs/readme.md": {"layer": "app", "adopted": True},
+                "missing.c": {"layer": "missing", "adopted": True},
+                "excluded.c": {"layer": "excluded", "adopted": True},
+                "adopted.c": {"layer": "base", "adopted": True},
+            }
+        }
+        (gitops.layer_cache_path(self.root, "excluded") / "excluded.c").parent.mkdir(parents=True)
+        (gitops.layer_cache_path(self.root, "excluded") / "excluded.c").write_text("excluded\n")
+        (gitops.layer_cache_path(self.root, "base")).mkdir(parents=True)
+        (gitops.layer_cache_path(self.root, "base") / "adopted.c").write_text("adopted\n")
+        providers: dict[str, list[composer.Provider]] = {}
+
+        composer.add_adopted_cache_file_providers(self.root, manifest_data, enabled_layers, providers)
+
+        self.assertEqual(list(providers), ["adopted.c"])
+        self.assertEqual(composer.file_providers(self.root, {"layers": [{"name": "app", "mount": "/app"}]}, "docs/readme.md"), [])
 
     def test_merger_and_exporter_branches(self) -> None:
         with self.assertRaisesRegex(LayerError, "No layers selected"):
@@ -560,15 +711,18 @@ class LayerGitUnitTest(unittest.TestCase):
         self.assertEqual(manifest.normalize_mount(None), "/")
         self.assertEqual(manifest.normalize_mount(""), "/")
         self.assertEqual(manifest.normalize_mount("."), "/")
+        self.assertEqual(manifest.normalize_mount("///"), "/")
         self.assertEqual(manifest.normalize_mount("app//src"), "/app/src")
         self.assertEqual(manifest.buildtree_path_for_source("src/main.c", "/app"), "app/src/main.c")
         self.assertEqual(manifest.source_path_for_buildtree("app/src/main.c", "/app"), "src/main.c")
+        self.assertIsNone(manifest.source_path_for_buildtree("app", "/app"))
         self.assertIsNone(manifest.source_path_for_buildtree("docs/readme.md", "/app"))
-        for bad_mount in ("../outside", "/tmp/outside", "C:\\temp", "app/../../outside"):
+        for bad_mount in ("../outside", "/tmp/outside", "C:\\temp", "app\\src", "app/../../outside"):
             with self.assertRaisesRegex(LayerError, "Invalid layer mount"):
                 manifest.normalize_mount(bad_mount)
         self.assertIsNone(cli.gitignore_output_entry(self.root, "/outside"))
         self.assertIsNone(cli.gitignore_output_entry(self.root, "."))
+        self.assertEqual(cli.display_path(self.root, Path("/tmp/outside-layergit-cli-test")), "/tmp/outside-layergit-cli-test")
         self.assertEqual(cli.infer_layer_name("git@example.com:Team/My Repo.git", []), "my-repo")
         self.assertEqual(cli.unique_layer_name("layer", [{"name": "layer"}, {"name": "layer-2"}]), "layer-3")
         self.assertEqual(cli.invalid_command(["--version"]), None)
@@ -585,6 +739,36 @@ class LayerGitUnitTest(unittest.TestCase):
             self.assertEqual(cli.cmd_help("layer", []), 0)
         with contextlib.redirect_stderr(stderr):
             self.assertEqual(cli.cmd_help("layer", ["help"]), 1)
+
+    def test_cli_apply_delete_validation_edges(self) -> None:
+        args = SimpleNamespace(
+            path="ghost.c",
+            all=False,
+            new=False,
+            target_layer=None,
+            delete=True,
+            dry_run=False,
+            stage=False,
+            no_stage=False,
+        )
+        with patch("layergit.cli.load_manifest", return_value={"workspace": {"output": "./out"}}), patch(
+            "layergit.cli.buildtree_diff",
+            return_value={"modified": [], "new": [], "deleted": [], "hidden": []},
+        ), patch("layergit.cli.explain_file", return_value={"hidden": True}):
+            with self.assertRaisesRegex(LayerError, "hidden by selection"):
+                cli.cmd_apply(self.root, args)
+        with patch("layergit.cli.load_manifest", return_value={"workspace": {"output": "./out"}}), patch(
+            "layergit.cli.buildtree_diff",
+            return_value={"modified": [], "new": [], "deleted": [], "hidden": []},
+        ), patch("layergit.cli.explain_file", return_value={"unowned": True}):
+            with self.assertRaisesRegex(LayerError, "not owned by LayerGit"):
+                cli.cmd_apply(self.root, args)
+        with patch("layergit.cli.load_manifest", return_value={"workspace": {"output": "./out"}}), patch(
+            "layergit.cli.buildtree_diff",
+            return_value={"modified": [], "new": [], "deleted": [], "hidden": []},
+        ), patch("layergit.cli.explain_file", return_value={"visible": {"layer": "base"}}):
+            with self.assertRaisesRegex(LayerError, "ownership metadata is stale"):
+                cli.cmd_apply(self.root, args)
 
     def test_cli_formatter_and_cmd_add_helper_edges(self) -> None:
         manifest_data = {

@@ -621,6 +621,8 @@ def cmd_diff(root: Path, args: argparse.Namespace) -> int:
 def cmd_apply(root: Path, args: argparse.Namespace) -> int:
     if not (args.path or args.all or args.new or args.target_layer):
         raise LayerError("apply requires a path, --all, --new, or --layer <layer>")
+    if args.delete and not args.path:
+        raise LayerError("apply --delete requires a path")
     manifest = load_manifest(root)
     diff = buildtree_diff(
         root,
@@ -631,12 +633,46 @@ def cmd_apply(root: Path, args: argparse.Namespace) -> int:
     )
     if args.path and diff.get("hidden"):
         item = diff["hidden"][0]
+        if args.delete:
+            raise LayerError(
+                f"Cannot apply delete for {item['path']} because it is hidden by selection.\n"
+                f"Use `layer unuse {item['path']}` to restore normal provider selection, or delete from a specific layer repo with Git."
+            )
         selected_layer = item.get("selected_layer") or "unknown"
         raise LayerError(
             f"Cannot apply {item['path']} because it is hidden by selection.\n"
             f"Assigned layer {selected_layer} does not provide this file.\n"
             f"Create the file under the assigned layer or clear the selection with `layer unuse {item['path']}`."
         )
+    if args.delete:
+        rel_path = normalize_buildtree_path(args.path, root, output_path(root, manifest))
+        buildtree_file = output_path(root, manifest) / rel_path
+        if buildtree_file.exists():
+            entry = explain_file(root, rel_path, manifest)
+            if entry is None or entry.get("unowned"):
+                raise LayerError(f"Cannot apply delete for {rel_path} because it is not owned by LayerGit.")
+            raise LayerError(
+                f"Cannot apply delete for {rel_path} because buildtree/{rel_path} still exists.\n"
+                f"Delete buildtree/{rel_path} first, then run `layer apply --delete {rel_path}`."
+            )
+        if not diff.get("deleted"):
+            entry = explain_file(root, rel_path, manifest)
+            if entry and entry.get("hidden"):
+                raise LayerError(
+                    f"Cannot apply delete for {rel_path} because it is hidden by selection.\n"
+                    f"Use `layer unuse {rel_path}` to restore normal provider selection, or delete from a specific layer repo with Git."
+                )
+            if entry is None or entry.get("unowned"):
+                raise LayerError(f"Cannot apply delete for {rel_path} because it is not owned by LayerGit.")
+            raise LayerError("Cannot apply delete because ownership metadata is stale.\nRun `layer compose` or `layer doctor`.")
+        diff = {
+            "modified": [],
+            "new": [],
+            "deleted": diff.get("deleted", []),
+            "stale": [],
+            "hidden": [],
+            "ignored": [],
+        }
     result = apply_buildtree_changes(
         root,
         manifest,
@@ -645,6 +681,7 @@ def cmd_apply(root: Path, args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         stage_modified=args.stage,
         stage_new=not args.no_stage,
+        stage_deleted=not args.no_stage,
     )
     print(format_apply_result(result, dry_run=args.dry_run))
     return 0
@@ -961,9 +998,10 @@ def format_apply_result(data: dict[str, list[dict[str, str | None]]], *, dry_run
     verb = "Would apply" if dry_run else "Applied"
     modified = data.get("modified", [])
     new = data.get("new", [])
+    deleted = data.get("deleted", [])
     append_apply_section(lines, f"{verb} modified{staging_suffix(modified)}:", modified, target_key="layer")
     append_apply_section(lines, f"{verb} new{staging_suffix(new)}:", new, target_key="write_layer", label="write layer")
-    append_apply_section(lines, f"{verb} deleted:", data.get("deleted", []), target_key="layer")
+    append_apply_section(lines, f"{verb} deleted{staging_suffix(deleted)}:", deleted, target_key="layer")
     append_apply_section(
         lines,
         "Deleted buildtree file not applied:",
@@ -979,6 +1017,8 @@ def format_apply_result(data: dict[str, list[dict[str, str | None]]], *, dry_run
     )
     if data.get("skipped_deleted"):
         lines.extend(["", "Use:", "  layer apply --delete <path>"])
+    if deleted and not dry_run:
+        lines.extend(["", "Masked copies in lower layers were not deleted."])
     unstaged_new = [item for item in new if item.get("staged") is False]
     if unstaged_new and not dry_run:
         lines.extend(["", "Warning: new files were copied but left untracked in Git.", "Run:"])
@@ -986,7 +1026,14 @@ def format_apply_result(data: dict[str, list[dict[str, str | None]]], *, dry_run
             write_layer = item.get("write_layer") or "layer"
             source_path = item.get("source_path") or item.get("path")
             lines.append(f"  layer -L {write_layer} git add {source_path}")
-    staged = [item for item in modified + new if item.get("staged") is True]
+    unstaged_deleted = [item for item in deleted if item.get("staged") is False]
+    if unstaged_deleted and not dry_run:
+        lines.extend(["", "Warning: deletions were not staged.", "Run:"])
+        for item in unstaged_deleted:
+            layer = item.get("layer") or "layer"
+            source_path = item.get("source_path") or item.get("path")
+            lines.append(f"  layer -L {layer} git add -u {source_path}")
+    staged = [item for item in modified + new + deleted if item.get("staged") is True]
     if staged and not dry_run:
         lines.extend(["", "Next:"])
         by_layer: dict[str, bool] = {}

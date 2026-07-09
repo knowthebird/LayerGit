@@ -27,6 +27,9 @@
     "onCommand:layergit.compose",
     "onCommand:layergit.openOutput",
     "onCommand:layergit.applyAll",
+    "onCommand:layergit.newFile",
+    "onCommand:layergit.adoptFile",
+    "onCommand:layergit.deleteFile",
     "onCommand:layergit.setWriteLayer",
     "onCommand:layergit.clearSelection",
     "onCommand:layergit.explainCurrentFile"
@@ -126,6 +129,11 @@
         "icon": "$(check)"
       },
       {
+        "command": "layergit.newFile",
+        "title": "LayerGit: New File...",
+        "icon": "$(new-file)"
+      },
+      {
         "command": "layergit.explainCurrentFile",
         "title": "LayerGit: Explain Current File"
       },
@@ -170,6 +178,14 @@
         "title": "LayerGit: Apply File"
       },
       {
+        "command": "layergit.adoptFile",
+        "title": "LayerGit: Adopt into Layer..."
+      },
+      {
+        "command": "layergit.deleteFile",
+        "title": "LayerGit: Delete..."
+      },
+      {
         "command": "layergit.clearSelection",
         "title": "LayerGit: Clear Selection"
       },
@@ -203,6 +219,11 @@
         {
           "command": "layergit.applyAll",
           "when": "(view == layergit.layers || view == layergit.composedTree) && layergit.workspaceFound",
+          "group": "navigation"
+        },
+        {
+          "command": "layergit.newFile",
+          "when": "view == layergit.composedTree && layergit.workspaceFound",
           "group": "navigation"
         },
         {
@@ -286,6 +307,16 @@
           "command": "layergit.applyFile",
           "when": "view == layergit.composedTree && viewItem == layergit.file",
           "group": "apply"
+        },
+        {
+          "command": "layergit.adoptFile",
+          "when": "view == layergit.composedTree && viewItem == layergit.file",
+          "group": "apply"
+        },
+        {
+          "command": "layergit.deleteFile",
+          "when": "view == layergit.composedTree && viewItem == layergit.file",
+          "group": "delete"
         },
         {
           "command": "layergit.clearSelection",

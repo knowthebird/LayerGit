@@ -107,6 +107,7 @@ def apply_buildtree_changes(
     dry_run: bool = False,
     stage_modified: bool = False,
     stage_new: bool = True,
+    stage_deleted: bool = True,
 ) -> dict[str, list[dict[str, str | None]]]:
     applied_modified: list[dict[str, str | None]] = []
     applied_new: list[dict[str, str | None]] = []
@@ -153,11 +154,9 @@ def apply_buildtree_changes(
         if not include_deleted:
             skipped_deleted.append(item)
             continue
-        target = root / str(item["layer_path"])
-        if not dry_run and target.exists() and target.is_file():
-            target.unlink()
-            remove_empty_parents(target.parent, layer_cache_path(root, str(item["layer"])))
-        applied_deleted.append(item)
+        delete_from_layer(root, manifest, item, dry_run=dry_run, stage=stage_deleted)
+        result_item = item if dry_run else {**item, "staged": stage_deleted}
+        applied_deleted.append(result_item)
 
     return {
         "modified": applied_modified,
@@ -194,6 +193,50 @@ def stage_layer_file(root: Path, manifest: dict[str, Any], item: dict[str, str |
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or f"git add failed for {source_path}"
         raise LayerError(f"Copied {source_path} into layer {layer_name}, but staging failed: {message}")
+
+
+def delete_from_layer(
+    root: Path,
+    manifest: dict[str, Any],
+    item: dict[str, str | None],
+    *,
+    dry_run: bool,
+    stage: bool,
+) -> None:
+    layer_name = item.get("layer")
+    source_path = item.get("source_path")
+    if not layer_name or not source_path:
+        raise LayerError(f"Cannot apply delete for {item.get('path') or 'unknown path'} because ownership metadata is stale.")
+    layer_name = str(layer_name)
+    source_path = str(source_path)
+    if PurePosixPath(source_path).is_absolute() or ".." in PurePosixPath(source_path).parts:
+        raise LayerError("Cannot apply delete because ownership metadata is stale.")
+
+    layer = next((candidate for candidate in manifest.get("layers", []) if candidate.get("name") == layer_name), {})
+    cache = layer_cache_path(root, layer_name)
+    if layer.get("kind") == "local":
+        cache = ensure_local_layer_repo(root, layer_name)
+    elif not is_git_repo(cache):
+        raise LayerError(f"Layer {layer_name} cache is not a Git repository: {cache}")
+
+    target = cache / source_path
+    try:
+        target.relative_to(cache)
+    except ValueError as exc:
+        raise LayerError("Cannot apply delete because ownership metadata is stale.") from exc
+    if not target.exists() or not target.is_file():
+        raise LayerError(f"Cannot apply delete for {item.get('path')} because ownership metadata is stale.")
+    if dry_run:
+        return
+
+    target.unlink()
+    remove_empty_parents(target.parent, cache)
+    if not stage:
+        return
+    result = run_git(["add", "-u", "--", source_path], cache, check=False)
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or f"git add -u failed for {source_path}"
+        raise LayerError(f"Deleted {source_path} from layer {layer_name}, but staging failed: {message}")
 
 
 def owned_item(root: Path, output: Path, rel_path: str, layer: str, source_path: str) -> dict[str, str | None]:
