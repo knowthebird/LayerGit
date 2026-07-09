@@ -3,6 +3,9 @@
 LayerGit is early alpha. Treat each release as a shareable snapshot, not a
 stability guarantee.
 
+When LayerGit is published to PyPI, prefer PyPI Trusted Publishing from GitHub
+Actions instead of storing long-lived PyPI API tokens.
+
 ## Before tagging
 
 - Review `README.md` install, demo, CLI, and VS Code extension instructions.

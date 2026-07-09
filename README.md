@@ -1,6 +1,7 @@
 # LayerGit
 
 [![CI](https://github.com/knowthebird/LayerGit/actions/workflows/ci.yml/badge.svg)](https://github.com/knowthebird/LayerGit/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/knowthebird/LayerGit/actions/workflows/codeql.yml/badge.svg)](https://github.com/knowthebird/LayerGit/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 LayerGit composes multiple normal Git repositories into one generated,
@@ -14,9 +15,9 @@ LayerGit generates `buildtree/` from those layers, records which layer supplied
 each visible file, and shows which lower-layer files were masked or
 intentionally hidden.
 
-> Status: experimental. LayerGit is tested with real Git repositories, but it 
-> is still a new tool. Try it on demo or disposable repos first, and review 
-> `layer doctor`, `layer diff`, and dry-run output before applying changes to 
+> **Status:** Experimental. LayerGit is tested with real Git repositories, but
+> it is still a new tool. Try it on demo or disposable repos first, and review
+> `layer doctor`, `layer diff`, and dry-run output before applying changes to
 > important repositories.
 
 ## 30 Second Demo
@@ -198,10 +199,26 @@ precedence, masking, provenance, and apply-back behavior.
 
 See [docs/ALTERNATIVES.md](docs/ALTERNATIVES.md) for a fuller comparison.
 
+## Trust and Verification
+
+LayerGit is tested with real Git repositories, not only mocked file operations.
+
+The test suite includes safety invariants for source-repo isolation,
+masked-layer preservation, dry-run behavior, dirty buildtree protection,
+mount-path mapping, apply/delete staging behavior, and CLI JSON compatibility.
+
+LayerGit never commits or pushes during normal layer, compose, apply, delete,
+or selection workflows. Source repos are changed only by explicit apply/delete
+operations or by direct user-run Git commands inside a layer repo.
+
+See [docs/INVARIANTS.md](docs/INVARIANTS.md) and
+[docs/SAFETY.md](docs/SAFETY.md).
+
 ## Detailed Documentation
 
 - [Concepts](docs/CONCEPTS.md)
 - [Safety](docs/SAFETY.md)
+- [Safety invariants](docs/INVARIANTS.md)
 - [Alternatives](docs/ALTERNATIVES.md)
 - [Demos](docs/DEMOS.md)
 - [VS Code extension](docs/VS_CODE_EXTENSION.md)

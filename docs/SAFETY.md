@@ -3,12 +3,15 @@
 LayerGit is designed around explicit write operations. It should be possible to
 preview or explain what will happen before source repos change.
 
+For the full list of test-backed safety promises, see
+[INVARIANTS.md](INVARIANTS.md).
+
 ## Source of Truth
 
 - `.layer/cache/<layer>/` repos are the source of truth.
 - `buildtree/` is generated output.
 - LayerGit never commits or pushes.
-- Masked providers are not deleted.
+- Masked lower-layer files are not deleted.
 
 ## Doctor
 
@@ -68,7 +71,7 @@ the current buildtree content into another layer and assigns the path there.
 
 ## Use, Hide, Apply, Delete
 
-`layer use <path> <layer>` only selects an existing provider. If the target
+`layer use <path> <layer>` only selects an existing layer copy. If the target
 layer does not provide the path, LayerGit fails and suggests explicit choices:
 
 ```bash
@@ -76,7 +79,7 @@ layer use common/util.c board-support --hide
 layer apply common/util.c --to board-support
 ```
 
-`layer use --hide` suppresses inherited lower-layer providers without changing
+`layer use --hide` suppresses inherited lower-layer files without changing
 source repos.
 
 `layer apply <path> --to <layer>` copies the current buildtree file into the
@@ -85,14 +88,15 @@ selected layer and assigns the path to that layer.
 `layer apply` copies buildtree edits back to the current owning layer or write
 layer.
 
-`layer apply <path> --delete` applies a missing buildtree file as a source deletion in
-the current visible owning layer. It does not delete masked providers.
+`layer apply <path> --delete` applies a missing buildtree file as a source
+deletion in the current visible owning layer. It does not delete masked
+lower-layer files.
 
 ## Safety Table
 
-| Command | Source repo changed? | Provider selection changed? | Stages by default? | Purpose |
+| Command | Source repo changed? | Selected layer changed? | Stages by default? | Purpose |
 |---|---:|---:|---:|---|
-| `layer use <path> <layer>` | no | yes | no | Select an existing provider |
+| `layer use <path> <layer>` | no | yes | no | Select an existing layer copy |
 | `layer use <path> <layer> --hide` | no | yes | no | Suppress inherited lower-layer file |
 | `layer apply <path>` | yes | no | no | Apply edit to current owning layer |
 | `layer apply <path> --to <layer>` | yes | yes | new files only | Apply current buildtree content to a chosen layer |

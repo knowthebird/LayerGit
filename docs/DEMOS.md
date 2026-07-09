@@ -14,7 +14,7 @@ demonstrates:
 
 - overlapping paths
 - top-layer-wins precedence
-- masked providers
+- masked lower-layer files
 - `layer explain`
 - `layer use`
 - applying a buildtree edit back to a layer
@@ -23,6 +23,9 @@ demonstrates:
 ## Planned Vendor / Board / App Demo
 
 TODO: add `examples/vendor-board-app/` when the richer demo stabilizes.
+When it exists, add a matching verification script that can be run from the repo
+root and checks the documented masking, mount-path, apply, delete, and doctor
+behavior.
 
 The intended scenario:
 
