@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 from .errors import LayerError
-from .gitops import current_commit, layer_cache_path, sync_layer, tracked_files
+from .gitops import current_commit, layer_cache_path, porcelain_status, sync_layer, tracked_files
 from .manifest import (
     buildtree_path_for_source,
     conflicts_path,
@@ -42,6 +42,7 @@ def compose(
     *,
     sync: bool = True,
     clean: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     layers = manifest.get("layers", [])
     enabled_layers = [
@@ -150,6 +151,20 @@ def compose(
     warnings.extend(policy_warnings)
 
     previous_ownership = load_existing_ownership(root)
+    dirty_owned = dirty_owned_output_files(root, manifest, previous_ownership, visible)
+    if dirty_owned and not clean and not dry_run:
+        rel_path = dirty_owned[0]["path"]
+        layer = dirty_owned[0].get("layer") or "the current owner"
+        raise LayerError(
+            f"{rel_path} has unapplied buildtree edits.\n\n"
+            "Choose an explicit action:\n"
+            f"  layer apply {rel_path}\n"
+            f"      Apply edits to {layer}.\n\n"
+            f"  layer apply {rel_path} --to <layer>\n"
+            "      Copy current buildtree content into another layer and assign the path there.\n\n"
+            "  layer compose --clean\n"
+            "      Discard buildtree edits and regenerate from layers."
+        )
     for rel_path, provider, existing_kind in unowned_output_collisions(
         output_path(root, manifest),
         visible,
@@ -169,15 +184,46 @@ def compose(
                 ),
             }
         )
-    write_output_tree(output_path(root, manifest), visible, previous_ownership, clean=clean)
-    write_generated_files(root, manifest, ownership, conflicts, warnings)
+    if not dry_run:
+        write_output_tree(output_path(root, manifest), visible, previous_ownership, clean=clean)
+        write_generated_files(root, manifest, ownership, conflicts, warnings)
     return {
         "visible_files": sum(1 for provider in visible.values() if provider is not None),
         "masked_files": sum(len(item.get("masked", [])) for item in ownership.values()),
         "conflicts": conflicts,
         "warnings": warnings,
         "ownership": ownership,
+        "dry_run": dry_run,
     }
+
+
+def dirty_owned_output_files(
+    root: Path,
+    manifest: dict[str, Any],
+    previous_ownership: dict[str, Any],
+    planned_visible: dict[str, Provider | None],
+) -> list[dict[str, str]]:
+    output = output_path(root, manifest)
+    dirty: list[dict[str, str]] = []
+    for rel_path, entry in sorted(previous_ownership.items()):
+        visible = entry.get("visible")
+        if not visible:
+            continue
+        planned_provider = planned_visible.get(rel_path)
+        if planned_provider is None:
+            continue
+        if planned_provider.layer_name != visible.get("layer") or planned_provider.source_path != visible.get("source_path"):
+            continue
+        if visible.get("commit") and planned_provider.commit != visible.get("commit"):
+            continue
+        if porcelain_status(planned_provider.source_root) != "clean":
+            continue
+        target = output / rel_path
+        source = planned_provider.abs_path
+        if target.exists() and target.is_file() and source.exists() and source.is_file():
+            if not filecmp.cmp(target, source, shallow=False):
+                dirty.append({"path": rel_path, "layer": visible.get("layer", "")})
+    return dirty
 
 
 def selected_file_layer(manifest: dict[str, Any], rel_path: str) -> str | None:

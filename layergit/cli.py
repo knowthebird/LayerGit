@@ -27,8 +27,10 @@ from .manifest import (
 from .merger import merge_layers
 from .reports import (
     composed_tree,
+    doctor_report,
     explain_file,
     explain_json,
+    format_doctor_report,
     format_explain,
     format_overlaps,
     format_status,
@@ -50,6 +52,7 @@ PUBLIC_COMMANDS = {
     "enable",
     "disable",
     "status",
+    "doctor",
     "compose",
     "tree",
     "diff",
@@ -81,6 +84,7 @@ These are common LayerGit commands used in various situations:
 Workspace:
   status              Show workspace and layer status
   status --short      Show compact workspace status
+  doctor              Run read-only workspace safety checks
   compose             Regenerate the composed output tree
   compose --clean     Remove the output tree and regenerate from scratch
   tree                Show the composed tree
@@ -101,8 +105,6 @@ Layer management:
 File provenance / selection:
   explain <file>      Explain which layer provides a file
   use <file> <layer>  Select which layer provides a file
-  adopt <file> <layer>
-                      Copy a buildtree file into a layer and select it
   unuse <file>        Remove an explicit file selection
 
 Git passthrough:
@@ -123,9 +125,10 @@ Examples:
   {prog} diff common/util.c
   {prog} overlaps
   {prog} apply common/util.c
+  {prog} apply common/util.c --to compb
+  {prog} apply common/util.c --delete
   {prog} explain common/util.c
   {prog} use common/util.c compb
-  {prog} adopt common/util.c compb
   {prog} -L local-edits git status
   {prog} -L compb git status
   {prog} -L compb git commit -m "Fix"
@@ -209,6 +212,10 @@ def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true")
     status.add_argument("--short", action="store_true", help="show compact status output")
 
+    doctor = sub.add_parser("doctor", help="Run read-only workspace safety checks")
+    doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--strict", action="store_true", help="exit nonzero when warnings are present")
+
     list_cmd = sub.add_parser("list", help="List configured layers")
     list_cmd.add_argument("--json", action="store_true")
 
@@ -245,6 +252,8 @@ def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
     apply.add_argument("--all", action="store_true", help="apply all modified owned files and new unowned files")
     apply.add_argument("--new", action="store_true", help="apply only new unowned buildtree files")
     apply.add_argument("--layer", dest="target_layer", help="apply only changes targeting this layer")
+    apply.add_argument("--to", dest="to_layer", help="apply one buildtree file to this layer and select it")
+    apply.add_argument("--force", action="store_true", help="with --to, overwrite an existing different target-layer file")
     apply.add_argument("--dry-run", action="store_true", help="show what would be applied without copying files")
     apply.add_argument("--delete", action="store_true", help="apply deleted buildtree files by deleting layer source files")
     apply.add_argument("--yes", action="store_true", help="accepted for non-interactive workflows")
@@ -264,6 +273,7 @@ def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
         help="Rebuild the composed output tree",
     )
     compose_cmd.add_argument("--json", action="store_true")
+    compose_cmd.add_argument("--dry-run", action="store_true", help="preview compose without writing buildtree or metadata")
     compose_cmd.add_argument(
         "--clean",
         action="store_true",
@@ -290,17 +300,19 @@ def build_parser(prog: str = "layer") -> argparse.ArgumentParser:
     use_file.add_argument("path")
     use_file.add_argument("layer")
     use_file.add_argument("--hide", action="store_true", help="hide the path if the selected layer does not provide it")
+    use_file.add_argument("--dry-run", action="store_true", help="preview selection without changing layer.yaml or buildtree")
 
     unuse = sub.add_parser("unuse", help="Remove an explicit file selection")
     unuse.add_argument("path")
 
-    adopt = sub.add_parser("adopt", help="Copy a buildtree file into a layer and select that layer")
+    adopt = sub.add_parser("adopt", help="Deprecated alias for `apply <path> --to <layer>`")
     adopt.add_argument("path")
     adopt.add_argument("layer")
     adopt.add_argument("--force", action="store_true", help="overwrite an existing different target-layer file")
+    adopt.add_argument("--dry-run", action="store_true", help="preview without copying, staging, selecting, or composing")
     adopt_stage = adopt.add_mutually_exclusive_group()
-    adopt_stage.add_argument("--stage", action="store_true", help="stage the adopted file")
-    adopt_stage.add_argument("--no-stage", action="store_true", help="do not stage the adopted file")
+    adopt_stage.add_argument("--stage", action="store_true", help="stage the applied file")
+    adopt_stage.add_argument("--no-stage", action="store_true", help="do not stage the applied file")
 
     write = sub.add_parser("write", help="Set the default write layer")
     write.add_argument("selector")
@@ -330,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser(prog)
     args = parser.parse_args(argv)
+    if args.command == "apply":
+        args.deprecated_delete_order = deprecated_apply_delete_order(argv)
     root = Path.cwd()
 
     try:
@@ -347,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_move_layer(root, args)
         if args.command == "status":
             return cmd_status(root, args)
+        if args.command == "doctor":
+            return cmd_doctor(root, args)
         if args.command == "list":
             return cmd_list(root, args)
         if args.command == "tree":
@@ -416,6 +432,32 @@ def invalid_command(argv: list[str]) -> str | None:
             return None
         return None if item in PUBLIC_COMMANDS else item
     return None
+
+
+def deprecated_apply_delete_order(argv: list[str]) -> bool:
+    try:
+        apply_index = argv.index("apply")
+    except ValueError:
+        return False
+    delete_index: int | None = None
+    path_index: int | None = None
+    value_options = {"--layer", "--to"}
+    index = apply_index + 1
+    while index < len(argv):
+        item = argv[index]
+        if item == "--delete":
+            delete_index = index
+            index += 1
+            continue
+        if item in value_options:
+            index += 2
+            continue
+        if item.startswith("-"):
+            index += 1
+            continue
+        path_index = index
+        break
+    return delete_index is not None and path_index is not None and delete_index < path_index
 
 
 def cmd_init(root: Path, args: argparse.Namespace) -> int:
@@ -566,6 +608,39 @@ def cmd_status(root: Path, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(root: Path, args: argparse.Namespace) -> int:
+    try:
+        manifest = load_manifest(root)
+        data = doctor_report(root, manifest)
+    except Exception as exc:
+        data = {
+            "status": "error",
+            "workspace": {"root": str(root), "output": None, "manifest": "layer.yaml"},
+            "checks": [
+                {
+                    "id": "workspace.initialized",
+                    "level": "error",
+                    "message": str(exc),
+                }
+            ],
+            "summary": {"ok": 0, "warnings": 0, "errors": 1},
+        }
+        if args.json:
+            print(json.dumps(data, indent=2, sort_keys=True))
+        else:
+            print(format_doctor_report(data), file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        print(format_doctor_report(data))
+    if data["summary"]["errors"]:
+        return 2
+    if args.strict and data["summary"]["warnings"]:
+        return 1
+    return 0
+
+
 def cmd_list(root: Path, args: argparse.Namespace) -> int:
     manifest = load_manifest(root)
     data = layer_list(root, manifest)
@@ -619,10 +694,22 @@ def cmd_diff(root: Path, args: argparse.Namespace) -> int:
 
 
 def cmd_apply(root: Path, args: argparse.Namespace) -> int:
+    if getattr(args, "to_layer", None):
+        if args.all or args.new or args.target_layer or args.delete:
+            raise LayerError("apply --to requires exactly one path and cannot be combined with --all, --new, --layer, or --delete")
+        if not args.path:
+            raise LayerError("apply --to requires a path")
+        return cmd_apply_to_layer(root, args)
     if not (args.path or args.all or args.new or args.target_layer):
         raise LayerError("apply requires a path, --all, --new, or --layer <layer>")
     if args.delete and not args.path:
         raise LayerError("apply --delete requires a path")
+    if args.delete and getattr(args, "deprecated_delete_order", False):
+        print(
+            "`layer apply --delete <path>` is deprecated.\n"
+            "Use `layer apply <path> --delete` instead.",
+            file=sys.stderr,
+        )
     manifest = load_manifest(root)
     diff = buildtree_diff(
         root,
@@ -653,7 +740,7 @@ def cmd_apply(root: Path, args: argparse.Namespace) -> int:
                 raise LayerError(f"Cannot apply delete for {rel_path} because it is not owned by LayerGit.")
             raise LayerError(
                 f"Cannot apply delete for {rel_path} because buildtree/{rel_path} still exists.\n"
-                f"Delete buildtree/{rel_path} first, then run `layer apply --delete {rel_path}`."
+                f"Delete buildtree/{rel_path} first, then run `layer apply {rel_path} --delete`."
             )
         if not diff.get("deleted"):
             entry = explain_file(root, rel_path, manifest)
@@ -689,9 +776,14 @@ def cmd_apply(root: Path, args: argparse.Namespace) -> int:
 
 def cmd_compose(root: Path, args: argparse.Namespace) -> int:
     manifest = load_manifest(root)
-    result = compose(root, manifest, sync=False, clean=args.clean)
+    result = compose(root, manifest, sync=False, clean=args.clean, dry_run=args.dry_run)
     if args.json:
         print(json.dumps({k: v for k, v in result.items() if k != "ownership"}, indent=2, sort_keys=True))
+    elif args.dry_run:
+        print("Would compose buildtree from enabled layers.")
+        if args.clean:
+            print("Would remove the output tree first because --clean is set.")
+        print_compose_result(result, verb="Would compose")
     else:
         print_compose_result(result)
     return 1 if result["conflicts"] else 0
@@ -756,9 +848,31 @@ def cmd_use_file(root: Path, args: argparse.Namespace) -> int:
             "Choose an explicit action:\n"
             f"  layer use {rel_path} {args.layer} --hide\n"
             f"      Hide this path from buildtree/ by assigning it to {args.layer}.\n\n"
-            f"  layer adopt {rel_path} {args.layer}\n"
+            f"  layer apply {rel_path} --to {args.layer}\n"
             f"      Copy the current buildtree file into {args.layer} and assign the path there."
         )
+
+    if args.dry_run:
+        print(f"Would assign {rel_path} to {args.layer}.")
+        print("")
+        print("Buildtree path:")
+        print(f"  {rel_path}")
+        print("")
+        print("Source repos:")
+        print("  unchanged")
+        print("")
+        print("Git:")
+        print("  not staged")
+        if selected_layer_provides_path:
+            print("")
+            print("Provider selection:")
+            print(f"  {args.layer} would provide the visible file.")
+        else:
+            print("")
+            print("Provider selection:")
+            print(f"  {args.layer} would hide this path from buildtree/.")
+            print("  Lower providers would be masked and left untouched.")
+        return 0
 
     selection = {"layer": args.layer}
     if args.hide and not selected_layer_provides_path:
@@ -785,8 +899,18 @@ def cmd_use_file(root: Path, args: argparse.Namespace) -> int:
 
 
 def cmd_adopt_file(root: Path, args: argparse.Namespace) -> int:
+    print(
+        "`layer adopt <path> <layer>` is deprecated.\n"
+        "Use `layer apply <path> --to <layer>` instead.",
+        file=sys.stderr,
+    )
+    return cmd_apply_to_layer(root, args)
+
+
+def cmd_apply_to_layer(root: Path, args: argparse.Namespace) -> int:
     manifest = load_manifest(root)
-    layer = enabled_layer_by_name(manifest, args.layer, action="adopt files")
+    target_layer = getattr(args, "to_layer", None) or args.layer
+    layer = enabled_layer_by_name(manifest, target_layer, action="receive applied files")
     output = output_path(root, manifest)
     rel_path = normalize_buildtree_path(args.path, root, output)
     buildtree_file = output / rel_path
@@ -794,26 +918,47 @@ def cmd_adopt_file(root: Path, args: argparse.Namespace) -> int:
     source_path = source_path_for_buildtree(rel_path, mount)
     if source_path is None:
         raise LayerError(
-            f"Cannot adopt {rel_path} into layer {args.layer} because it is outside mount {mount}."
+            f"Cannot apply {rel_path} to layer {target_layer} because it is outside mount {mount}."
         )
-    destination = layer_cache_path(root, args.layer) / source_path
+    destination = layer_cache_path(root, target_layer) / source_path
     if not buildtree_file.exists():
         entry = explain_file(root, rel_path, manifest)
         if entry and entry.get("hidden"):
-            raise LayerError(hidden_adopt_error(rel_path, args.layer, entry, destination.exists()))
-        raise LayerError(f"Cannot adopt {rel_path} because it does not exist in buildtree/.")
+            raise LayerError(hidden_apply_to_error(rel_path, target_layer, entry, destination.exists()))
+        raise LayerError(f"Cannot apply {rel_path} to layer {target_layer} because it does not exist in buildtree/.")
     if not buildtree_file.is_file():
-        raise LayerError(f"Cannot adopt {rel_path} because it is not a file.")
+        raise LayerError(f"Cannot apply {rel_path} to layer {target_layer} because it is not a file.")
 
     if destination.exists() and not destination.is_file():
-        raise LayerError(f"Cannot adopt {rel_path}: target path {destination} is not a file.")
-    if destination.exists() and not filecmp.cmp(buildtree_file, destination, shallow=False) and not args.force:
+        raise LayerError(f"Cannot apply {rel_path} to layer {target_layer}: target path {destination} is not a file.")
+    if destination.exists() and not filecmp.cmp(buildtree_file, destination, shallow=False) and not getattr(args, "force", False):
         raise LayerError(
-            f"Target layer {args.layer} already has {source_path} with different content.\n"
-            f"Use `layer adopt {rel_path} {args.layer} --force` to overwrite it."
+            f"Target layer {target_layer} already has {source_path} with different content.\n"
+            f"Use `layer apply {rel_path} --to {target_layer} --force` to overwrite it."
         )
-    target_tracked = source_path in tracked_files(layer_cache_path(root, args.layer))
+    target_tracked = source_path in tracked_files(layer_cache_path(root, target_layer))
     should_stage = args.stage or (not args.no_stage and not target_tracked)
+
+    if args.dry_run:
+        action = "modified tracked file" if target_tracked else "new file"
+        staging = "would stage" if should_stage else "would not stage"
+        print(f"Would apply {rel_path} to layer {target_layer}.")
+        print("")
+        print("Buildtree path:")
+        print(f"  {rel_path}")
+        print("")
+        print("Target source path:")
+        print(f"  {display_path(root, destination)}")
+        print("")
+        print("Git action:")
+        print(f"  {action}, {staging}")
+        print("")
+        print("Provider selection:")
+        print(f"  {target_layer} would become assigned provider for {rel_path}")
+        print("")
+        print("Source repos:")
+        print("  unchanged")
+        return 0
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(buildtree_file, destination)
@@ -823,14 +968,14 @@ def cmd_adopt_file(root: Path, args: argparse.Namespace) -> int:
             manifest,
             {
                 "path": rel_path,
-                "write_layer": args.layer,
+                "write_layer": target_layer,
                 "source_path": source_path,
                 "layer_path": display_path(root, destination),
             },
             dry_run=False,
         )
 
-    manifest.setdefault("file_selection", {})[rel_path] = {"layer": args.layer, "adopted": True}
+    manifest.setdefault("file_selection", {})[rel_path] = {"layer": target_layer, "adopted": True}
     file_precedence = manifest.get("file_precedence")
     if isinstance(file_precedence, dict):
         file_precedence.pop(rel_path, None)
@@ -839,22 +984,22 @@ def cmd_adopt_file(root: Path, args: argparse.Namespace) -> int:
     save_manifest(root, manifest)
     result = compose(root, manifest, sync=False)
 
-    print(f"Adopted {rel_path} into {args.layer}.")
+    print(f"Applied {rel_path} to layer {target_layer}.")
     print(f"Copied {display_path(root, buildtree_file)} -> {display_path(root, destination)}")
-    print(f"Assigned {rel_path} to {args.layer}.")
+    print(f"Assigned {rel_path} to {target_layer}.")
     if should_stage:
-        print(f"Staged {source_path} in {args.layer}.")
+        print(f"Staged {source_path} in {target_layer}.")
         print("")
         print("Next:")
-        print(f"  layer -L {args.layer} git diff --staged")
-        print(f"  layer -L {args.layer} git commit -m \"Add {Path(source_path).name}\"")
+        print(f"  layer -L {target_layer} git diff --staged")
+        print(f"  layer -L {target_layer} git commit -m \"Add {Path(source_path).name}\"")
     elif target_tracked:
         print("Git did not stage, commit, or push this tracked file.")
     else:
         print("")
         print(f"Warning: {source_path} is untracked in Git.")
         print("Run:")
-        print(f"  layer -L {args.layer} git add {source_path}")
+        print(f"  layer -L {target_layer} git add {source_path}")
     print_compose_result(result)
     return 1 if result["conflicts"] else 0
 
@@ -927,9 +1072,9 @@ def cmd_export(root: Path, args: argparse.Namespace) -> int:
     return 0
 
 
-def print_compose_result(result: dict) -> None:
+def print_compose_result(result: dict, *, verb: str = "Composed") -> None:
     print(
-        f"Composed {result['visible_files']} visible file(s), "
+        f"{verb} {result['visible_files']} visible file(s), "
         f"{result['masked_files']} masked file(s), "
         f"{len(result['conflicts'])} conflict(s), "
         f"{len(result.get('warnings', []))} warning(s)"
@@ -1016,7 +1161,7 @@ def format_apply_result(data: dict[str, list[dict[str, str | None]]], *, dry_run
         label="assigned layer",
     )
     if data.get("skipped_deleted"):
-        lines.extend(["", "Use:", "  layer apply --delete <path>"])
+        lines.extend(["", "Use:", "  layer apply <path> --delete"])
     if deleted and not dry_run:
         lines.extend(["", "Masked copies in lower layers were not deleted."])
     unstaged_new = [item for item in new if item.get("staged") is False]
@@ -1097,14 +1242,14 @@ def dirty_file_selection_error(rel_path: str, layer: str) -> str:
         "Choose an explicit action:\n"
         f"  layer apply {rel_path}\n"
         "      Apply edits to the current owning layer.\n\n"
-        f"  layer adopt {rel_path} {layer}\n"
+        f"  layer apply {rel_path} --to {layer}\n"
         f"      Copy current buildtree content into {layer} and assign the path there.\n\n"
         "  layer compose\n"
         "      Regenerate buildtree/ from layers and discard unapplied buildtree edits."
     )
 
 
-def hidden_adopt_error(rel_path: str, layer: str, entry: dict, target_exists: bool) -> str:
+def hidden_apply_to_error(rel_path: str, layer: str, entry: dict, target_exists: bool) -> str:
     selected_layer = entry.get("selected_layer") or "selection"
     masked = entry.get("masked") or []
     provider = masked[0].get("layer") if masked else None
@@ -1116,11 +1261,11 @@ def hidden_adopt_error(rel_path: str, layer: str, entry: dict, target_exists: bo
         else ""
     )
     return (
-        f"Cannot adopt {rel_path} because it is hidden by selection and buildtree/{rel_path} does not exist.\n"
+        f"Cannot apply {rel_path} to layer {layer} because it is hidden by selection and buildtree/{rel_path} does not exist.\n"
         f"Assigned layer: {selected_layer}.{provider_line}{target_line}\n\n"
-        "Restore the inherited file before adopting it:\n"
+        "Restore the inherited file before applying it to another layer:\n"
         f"  layer unuse {rel_path}\n"
-        f"  layer adopt {rel_path} {layer}"
+        f"  layer apply {rel_path} --to {layer}"
     )
 
 

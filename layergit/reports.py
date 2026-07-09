@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .composer import file_providers
-from .gitops import current_branch, current_commit, layer_cache_path, porcelain_status
+from .gitops import current_branch, current_commit, is_git_repo, layer_cache_path, porcelain_status, run_git
 from .manifest import conflicts_path, output_path, ownership_path, source_path_for_buildtree
 
 
@@ -73,6 +73,155 @@ def workspace_status(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         "warnings": conflict_data.get("warnings", []),
         "modified_files": modified_output_files(root, manifest, ownership),
     }
+
+
+def doctor_report(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    status = workspace_status(root, manifest)
+    checks: list[dict[str, Any]] = []
+
+    def add(check_id: str, level: str, message: str, **extra: Any) -> None:
+        item = {"id": check_id, "level": level, "message": message}
+        item.update({key: value for key, value in extra.items() if value is not None})
+        checks.append(item)
+
+    add("workspace.initialized", "ok", "workspace initialized")
+    add("workspace.manifest", "ok", "manifest: layer.yaml", path="layer.yaml")
+    output = manifest.get("workspace", {}).get("output", "./buildtree")
+    output_dir = output_path(root, manifest)
+    add(
+        "workspace.output",
+        "ok" if output_dir.exists() and output_dir.is_dir() else "warning",
+        f"output: {output}",
+        path=output,
+    )
+
+    layers = manifest.get("layers", [])
+    enabled_layer_names = {layer.get("name") for layer in layers if layer.get("enabled", True)}
+    write_layer = manifest.get("workspace", {}).get("write_layer")
+    if write_layer and write_layer in enabled_layer_names:
+        add("workspace.write_layer", "ok", f"write layer: {write_layer}", layer=write_layer)
+    elif write_layer:
+        add("workspace.write_layer", "error", f"write layer {write_layer} is missing or disabled", layer=write_layer)
+    else:
+        add("workspace.write_layer", "warning", "no write layer configured")
+
+    tree = status["composed_tree"]
+    stale_count = tree.get("stale_owned_files", 0)
+    add(
+        "generated.ownership",
+        "warning" if stale_count else "ok",
+        "ownership metadata current" if not stale_count else f"{stale_count} stale-owned files",
+        count=stale_count,
+    )
+    unowned_count = tree.get("untracked_files", 0)
+    add(
+        "generated.unowned",
+        "warning" if unowned_count else "ok",
+        f"{unowned_count} unowned files in buildtree",
+        count=unowned_count,
+    )
+    hidden_paths = [
+        rel_path
+        for rel_path, entry in current_ownership(load_json(ownership_path(root), {}), manifest).items()
+        if entry.get("hidden")
+    ]
+    add(
+        "generated.hidden",
+        "warning" if hidden_paths else "ok",
+        f"{len(hidden_paths)} hidden-by-selection paths",
+        count=len(hidden_paths),
+        paths=hidden_paths[:20],
+    )
+
+    add("layers.configured", "ok" if layers else "warning", f"{len(layers)} layers configured", count=len(layers))
+    for layer in layers:
+        layer_name = layer.get("name")
+        cache = layer_cache_path(root, str(layer_name))
+        if not cache.exists():
+            add("layer.cache_missing", "error", f"{layer_name} cache repo is missing", layer=layer_name, path=cache.as_posix())
+            continue
+        try:
+            repo_ok = is_git_repo(cache)
+        except Exception as exc:
+            add("layer.cache_git", "error", f"{layer_name} cache repo cannot be checked: {exc}", layer=layer_name)
+            continue
+        if not repo_ok:
+            add("layer.cache_git", "error", f"{layer_name} cache is not a Git repo", layer=layer_name, path=cache.as_posix())
+            continue
+        add("layer.cache", "ok", f"{layer_name} cache repo exists", layer=layer_name, path=cache.as_posix())
+        porcelain = git_porcelain(cache)
+        staged = [line for line in porcelain if is_staged_status(line)]
+        untracked = [line for line in porcelain if line.startswith("??")]
+        unstaged = [line for line in porcelain if is_unstaged_status(line)]
+        if staged:
+            add("layer.staged", "warning", f"{layer_name} has staged changes", layer=layer_name, count=len(staged))
+        if untracked:
+            add("layer.untracked", "warning", f"{layer_name} has untracked files", layer=layer_name, count=len(untracked))
+        if staged or unstaged or untracked:
+            add("layer.dirty", "warning", f"{layer_name} has uncommitted changes", layer=layer_name, count=len(porcelain))
+        else:
+            add("layer.clean", "ok", f"{layer_name} has no uncommitted changes", layer=layer_name)
+        if current_commit(cache) is None:
+            add("layer.no_commits", "warning", f"{layer_name} has no commits", layer=layer_name)
+        if layer.get("kind") == "local":
+            add("sharing.local_only", "warning", f"{layer_name} is local-only and cannot be reproduced from remotes", layer=layer_name)
+        unpushed = unpushed_commit_count(cache)
+        if unpushed:
+            add("sharing.unpushed", "warning", f"{layer_name} has {unpushed} unpushed commits", layer=layer_name, count=unpushed)
+
+    overlaps = overlap_report(root, manifest)
+    overlap_count = len(overlaps.get("overlaps", []))
+    add(
+        "overlaps.summary",
+        "warning" if overlap_count else "ok",
+        f"{overlap_count} overlapping paths",
+        count=overlap_count,
+    )
+
+    summary = {
+        "ok": sum(1 for item in checks if item["level"] == "ok"),
+        "warnings": sum(1 for item in checks if item["level"] == "warning"),
+        "errors": sum(1 for item in checks if item["level"] == "error"),
+    }
+    overall = "error" if summary["errors"] else "warning" if summary["warnings"] else "ok"
+    return {
+        "status": overall,
+        "workspace": {
+            "root": str(root),
+            "output": output,
+            "manifest": "layer.yaml",
+        },
+        "checks": checks,
+        "summary": summary,
+    }
+
+
+def git_porcelain(path: Path) -> list[str]:
+    result = run_git(["status", "--porcelain"], path, check=False)
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def is_staged_status(line: str) -> bool:
+    return len(line) >= 2 and line[:2] != "??" and line[0] != " "
+
+
+def is_unstaged_status(line: str) -> bool:
+    return len(line) >= 2 and line[:2] != "??" and line[1] != " "
+
+
+def unpushed_commit_count(path: Path) -> int:
+    result = run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], path, check=False)
+    if result.returncode != 0:
+        return 0
+    count = run_git(["rev-list", "--count", "@{upstream}..HEAD"], path, check=False)
+    if count.returncode != 0:
+        return 0
+    try:
+        return int(count.stdout.strip() or "0")
+    except ValueError:
+        return 0
 
 
 def layer_position(index: int, enabled_indexes: list[int]) -> str | None:
@@ -439,6 +588,52 @@ def format_status_short(status: dict[str, Any]) -> str:
             lines.append(f"  {rel_path}")
 
     return "\n".join(lines)
+
+
+def format_doctor_report(data: dict[str, Any]) -> str:
+    lines = ["LayerGit doctor", ""]
+    sections = [
+        ("Workspace", "workspace."),
+        ("Generated state", "generated."),
+        ("Layers", "layer."),
+        ("Overlaps", "overlaps."),
+        ("Sharing", "sharing."),
+    ]
+    checks = data.get("checks", [])
+    used_ids: set[str] = set()
+    for title, prefix in sections:
+        section_checks = [item for item in checks if str(item.get("id", "")).startswith(prefix)]
+        if not section_checks:
+            continue
+        lines.append(title)
+        for item in section_checks:
+            used_ids.add(str(item.get("id")))
+            lines.append(f"  {doctor_level_label(item.get('level')):<7} {item.get('message')}")
+            if item.get("id") == "overlaps.summary" and item.get("count", 0):
+                lines.append("          run `layer overlaps` to inspect visible/masked providers")
+        lines.append("")
+    other_checks = [item for item in checks if str(item.get("id")) not in used_ids]
+    if other_checks:
+        lines.append("Other")
+        for item in other_checks:
+            lines.append(f"  {doctor_level_label(item.get('level')):<7} {item.get('message')}")
+        lines.append("")
+    result = data.get("status", "ok")
+    if result == "error":
+        lines.append("Result: errors found")
+    elif result == "warning":
+        lines.append("Result: warnings found")
+    else:
+        lines.append("Result: ok")
+    return "\n".join(lines).rstrip()
+
+
+def doctor_level_label(level: Any) -> str:
+    if level == "warning":
+        return "WARN"
+    if level == "error":
+        return "ERROR"
+    return "OK"
 
 
 def format_status(status: dict[str, Any]) -> str:

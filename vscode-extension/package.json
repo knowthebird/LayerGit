@@ -175,15 +175,15 @@
       },
       {
         "command": "layergit.applyFile",
-        "title": "LayerGit: Apply File"
+        "title": "LayerGit: Apply to Owning Layer"
       },
       {
         "command": "layergit.adoptFile",
-        "title": "LayerGit: Adopt into Layer..."
+        "title": "LayerGit: Apply to Another Layer..."
       },
       {
         "command": "layergit.deleteFile",
-        "title": "LayerGit: Delete..."
+        "title": "LayerGit: Delete from Owning Layer..."
       },
       {
         "command": "layergit.clearSelection",

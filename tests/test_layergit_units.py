@@ -440,6 +440,73 @@ class LayerGitUnitTest(unittest.TestCase):
         )
         reports.add_extension_fields({"layer": "a", "source_path": "a.c", "commit": "abc"}, {"a": 1})
 
+    def test_doctor_report_helper_edges(self) -> None:
+        output = self.root / "out"
+        output.mkdir()
+        status = {
+            "composed_tree": {"output": "./out", "stale_owned_files": 0, "untracked_files": 0},
+        }
+        cache = gitops.layer_cache_path(self.root, "layer-a")
+        cache.mkdir(parents=True)
+        manifest_data = {
+            "workspace": {"output": "./out", "write_layer": "missing"},
+            "layers": [{"name": "layer-a", "kind": "git", "enabled": True}],
+        }
+        with patch("layergit.reports.workspace_status", return_value=status), patch(
+            "layergit.reports.is_git_repo", side_effect=LayerError("git failed")
+        ), patch("layergit.reports.overlap_report", return_value={"overlaps": []}):
+            failed = reports.doctor_report(self.root, manifest_data)
+        self.assertTrue(any(item["id"] == "workspace.write_layer" and item["level"] == "error" for item in failed["checks"]))
+        self.assertTrue(any(item["id"] == "layer.cache_git" for item in failed["checks"]))
+
+        with patch("layergit.reports.workspace_status", return_value=status), patch(
+            "layergit.reports.is_git_repo", return_value=False
+        ), patch("layergit.reports.overlap_report", return_value={"overlaps": []}):
+            not_repo = reports.doctor_report(self.root, {**manifest_data, "workspace": {"output": "./out"}})
+        self.assertTrue(any(item["message"].endswith("is not a Git repo") for item in not_repo["checks"]))
+
+        with patch("layergit.reports.workspace_status", return_value=status), patch(
+            "layergit.reports.is_git_repo", return_value=True
+        ), patch("layergit.reports.git_porcelain", return_value=["A  staged.c", "?? new.c"]), patch(
+            "layergit.reports.current_commit", return_value="abc"
+        ), patch("layergit.reports.unpushed_commit_count", return_value=2), patch(
+            "layergit.reports.overlap_report", return_value={"overlaps": [{"path": "a.c"}]}
+        ):
+            dirty = reports.doctor_report(self.root, {**manifest_data, "workspace": {"output": "./out", "write_layer": "layer-a"}})
+        self.assertTrue(any(item["id"] == "layer.staged" for item in dirty["checks"]))
+        self.assertTrue(any(item["id"] == "layer.untracked" for item in dirty["checks"]))
+        self.assertTrue(any(item["id"] == "sharing.unpushed" for item in dirty["checks"]))
+        self.assertTrue(any(item["id"] == "overlaps.summary" and item["level"] == "warning" for item in dirty["checks"]))
+        formatted = reports.format_doctor_report(dirty)
+        self.assertIn("run `layer overlaps`", formatted)
+        self.assertIn("Result: errors found", reports.format_doctor_report({"status": "error", "checks": [], "summary": {"errors": 1}}))
+        self.assertIn(
+            "Result: ok",
+            reports.format_doctor_report(
+                {
+                    "status": "ok",
+                    "checks": [{"id": "custom.check", "level": "ok", "message": "custom ok"}],
+                    "summary": {"ok": 1, "warnings": 0, "errors": 0},
+                }
+            ),
+        )
+
+        with patch("layergit.reports.run_git", return_value=subprocess.CompletedProcess(["git"], 1, "", "")):
+            self.assertEqual(reports.git_porcelain(cache), [])
+            self.assertEqual(reports.unpushed_commit_count(cache), 0)
+        with patch("layergit.reports.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess(["git"], 0, "origin/main\n", ""),
+                subprocess.CompletedProcess(["git"], 1, "", ""),
+            ]
+            self.assertEqual(reports.unpushed_commit_count(cache), 0)
+        with patch("layergit.reports.run_git") as run_git:
+            run_git.side_effect = [
+                subprocess.CompletedProcess(["git"], 0, "origin/main\n", ""),
+                subprocess.CompletedProcess(["git"], 0, "not-a-number\n", ""),
+            ]
+            self.assertEqual(reports.unpushed_commit_count(cache), 0)
+
     def test_worktree_edge_cases_and_dry_run(self) -> None:
         output = self.root / "out"
         output.mkdir()
@@ -652,6 +719,28 @@ class LayerGitUnitTest(unittest.TestCase):
 
         self.assertEqual(list(providers), ["adopted.c"])
         self.assertEqual(composer.file_providers(self.root, {"layers": [{"name": "app", "mount": "/app"}]}, "docs/readme.md"), [])
+        output = self.root / "out"
+        output.mkdir()
+        (output / "changed.c").write_text("old\n")
+        source_root = gitops.layer_cache_path(self.root, "base")
+        (source_root / "changed.c").write_text("new\n")
+        provider = composer.Provider(
+            layer_index=1,
+            layer_name="base",
+            repo=None,
+            commit="new",
+            source_root=source_root,
+            source_path="changed.c",
+            abs_path=source_root / "changed.c",
+            overrides=(),
+        )
+        dirty = composer.dirty_owned_output_files(
+            self.root,
+            {"workspace": {"output": "./out"}},
+            {"changed.c": {"visible": {"layer": "base", "source_path": "changed.c", "commit": "old"}}},
+            {"changed.c": provider},
+        )
+        self.assertEqual(dirty, [])
 
     def test_merger_and_exporter_branches(self) -> None:
         with self.assertRaisesRegex(LayerError, "No layers selected"):
@@ -741,11 +830,35 @@ class LayerGitUnitTest(unittest.TestCase):
             self.assertEqual(cli.cmd_help("layer", ["help"]), 1)
 
     def test_cli_apply_delete_validation_edges(self) -> None:
+        self.assertFalse(cli.deprecated_apply_delete_order(["status"]))
+        self.assertTrue(cli.deprecated_apply_delete_order(["apply", "--delete", "--to", "base", "ghost.c"]))
+        self.assertFalse(cli.deprecated_apply_delete_order(["apply", "ghost.c", "--delete"]))
+        apply_to_missing_path = SimpleNamespace(
+            path=None,
+            all=False,
+            new=False,
+            target_layer=None,
+            to_layer="base",
+            delete=False,
+        )
+        with self.assertRaisesRegex(LayerError, "apply --to requires a path"):
+            cli.cmd_apply(self.root, apply_to_missing_path)
+        apply_to_combined = SimpleNamespace(
+            path="ghost.c",
+            all=True,
+            new=False,
+            target_layer=None,
+            to_layer="base",
+            delete=False,
+        )
+        with self.assertRaisesRegex(LayerError, "cannot be combined"):
+            cli.cmd_apply(self.root, apply_to_combined)
         args = SimpleNamespace(
             path="ghost.c",
             all=False,
             new=False,
             target_layer=None,
+            to_layer=None,
             delete=True,
             dry_run=False,
             stage=False,

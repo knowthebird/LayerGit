@@ -396,17 +396,17 @@ async function handleDirtyFileSelection(
   const choice = await vscode.window.showWarningMessage(
     `${filePath} has unapplied buildtree edits. Choose how to handle them before selecting ${layerName}.`,
     { modal: true },
-    'Apply to Current Layer',
-    'Adopt Edits into Selected Layer',
+    'Apply to Owning Layer',
+    'Apply to Another Layer...',
     'Discard Edits and Switch'
   );
   if (!choice) {
     return false;
   }
-  if (choice === 'Adopt Edits into Selected Layer') {
-    return runAction(['adopt', filePath, layerName]);
+  if (choice === 'Apply to Another Layer...') {
+    return runAction(['apply', filePath, '--to', layerName]);
   }
-  if (choice === 'Apply to Current Layer') {
+  if (choice === 'Apply to Owning Layer') {
     const applied = await runAction(['apply', filePath]);
     if (!applied) {
       return false;
@@ -436,15 +436,15 @@ async function handleMissingProviderSelection(
 ): Promise<boolean> {
   if (fileHidden) {
     const choice = await vscode.window.showWarningMessage(
-      `${filePath} is currently hidden by layer selection. Restore the inherited file before adopting it into ${layerName}.`,
+      `${filePath} is currently hidden by layer selection. Restore the inherited file before applying it to ${layerName}.`,
       { modal: true },
-      'Restore Then Adopt',
+      'Restore Then Apply to Layer',
       'Keep Hidden'
     );
-    if (choice === 'Restore Then Adopt') {
+    if (choice === 'Restore Then Apply to Layer') {
       const restored = await runAction(['unuse', filePath]);
       if (restored) {
-        return runAction(['adopt', filePath, layerName]);
+        return runAction(['apply', filePath, '--to', layerName]);
       }
     }
     return false;
@@ -453,13 +453,13 @@ async function handleMissingProviderSelection(
     `${layerName} does not currently provide ${filePath}. Choose whether to hide the inherited file or copy the current buildtree file into ${layerName}.`,
     { modal: true },
     'Hide Inherited File',
-    'Adopt Current File'
+    'Apply to Another Layer...'
   );
   if (choice === 'Hide Inherited File') {
     return runAction(['use', filePath, layerName, '--hide']);
   }
-  if (choice === 'Adopt Current File') {
-    return runAction(['adopt', filePath, layerName]);
+  if (choice === 'Apply to Another Layer...') {
+    return runAction(['apply', filePath, '--to', layerName]);
   }
   return false;
 }
@@ -497,7 +497,7 @@ async function useLayerForFolder(
       failures += 1;
       cli.showDetails(`LayerGit folder selection skipped: ${file.file.path}`, [
         `${layerName} does not currently provide ${file.file.path}.`,
-        `Use the file context menu to hide or adopt this file explicitly.`,
+        `Use the file context menu to hide this file or apply it to another layer explicitly.`,
       ]);
       continue;
     }
@@ -551,16 +551,16 @@ async function adoptFile(
   if (!workspace || !files.length) {
     return;
   }
-  const layerName = await pickLayerName(cli, workspace, files.length === 1 ? `Adopt ${files[0].file.path} into Layer` : `Adopt ${files.length} files into Layer`);
+  const layerName = await pickLayerName(cli, workspace, files.length === 1 ? `Apply ${files[0].file.path} to Another Layer` : `Apply ${files.length} files to Another Layer`);
   if (!layerName) {
     return;
   }
   let succeeded = 0;
   for (const file of files) {
-    const args = ['adopt', file.file.path, layerName];
+    const args = ['apply', file.file.path, '--to', layerName];
     if (layerProvidesFile(file.file, layerName)) {
       const confirmed = await vscode.window.showWarningMessage(
-        `Layer ${layerName} already provides ${file.file.path}. Adopt will overwrite that layer's copy with the current buildtree file.`,
+        `Layer ${layerName} already provides ${file.file.path}. Applying to another layer adopts the current buildtree file into that layer and will overwrite that layer's copy.`,
         { modal: true },
         'Overwrite Layer Copy'
       );
@@ -574,7 +574,7 @@ async function adoptFile(
     }
   }
   refresh();
-  showBatchResult('Adopted into layer', succeeded, files.length);
+  showBatchResult('Applied to another layer', succeeded, files.length);
 }
 
 async function deleteFile(
@@ -640,14 +640,14 @@ async function deleteOneFile(
       `${filePath} is not owned by LayerGit. Deleting it will only remove the local buildtree file.`,
       { modal: true },
       'Delete Local Buildtree File',
-      'Adopt into Layer...'
+      'Apply to Another Layer...'
     );
     if (choice === 'Delete Local Buildtree File') {
       await deleteBuildtreeFile(node.uri);
       refresh();
       return true;
     }
-    if (choice === 'Adopt into Layer...') {
+    if (choice === 'Apply to Another Layer...') {
       await adoptFile(cli, node, undefined, refresh);
       return true;
     }
@@ -658,7 +658,7 @@ async function deleteOneFile(
     `Delete ${filePath}?\n\nChoose what LayerGit should do.`,
     { modal: true },
     'Hide Inherited File',
-    'Delete from Owning Layer',
+    'Delete from Owning Layer...',
     'Delete Generated Copy Only'
   );
   if (choice === 'Hide Inherited File') {
@@ -681,7 +681,7 @@ async function deleteOneFile(
     refresh();
     return true;
   }
-  if (choice === 'Delete from Owning Layer') {
+  if (choice === 'Delete from Owning Layer...') {
     const owner = node.file.visibleLayer ?? 'unknown';
     const confirmed = await vscode.window.showWarningMessage(
       `This will delete ${filePath} from layer ${owner}.\n\nMasked providers will remain untouched.`,
@@ -692,7 +692,7 @@ async function deleteOneFile(
       return false;
     }
     await deleteBuildtreeFile(node.uri);
-    return runCliAction(cli, workspace, ['apply', '--delete', filePath], refresh);
+    return runCliAction(cli, workspace, ['apply', filePath, '--delete'], refresh);
   }
   return false;
 }
@@ -706,18 +706,18 @@ async function handleDirtyFileBeforeDelete(
   const choice = await vscode.window.showWarningMessage(
     `${filePath} has unapplied buildtree edits. What should LayerGit do before deleting or hiding it?`,
     { modal: true },
-    'Apply to Current Layer',
-    'Adopt into Selected Layer',
+    'Apply to Owning Layer',
+    'Apply to Another Layer...',
     'Discard/regenerate',
     'Cancel'
   );
-  if (choice === 'Apply to Current Layer') {
+  if (choice === 'Apply to Owning Layer') {
     return runCliAction(cli, workspace, ['apply', filePath], refresh);
   }
-  if (choice === 'Adopt into Selected Layer') {
-    const layerName = await pickLayerName(cli, workspace, `Adopt ${filePath} into Layer`);
+  if (choice === 'Apply to Another Layer...') {
+    const layerName = await pickLayerName(cli, workspace, `Apply ${filePath} to Another Layer`);
     if (layerName) {
-      await runCliAction(cli, workspace, ['adopt', filePath, layerName], refresh);
+      await runCliAction(cli, workspace, ['apply', filePath, '--to', layerName], refresh);
     }
     return false;
   }
@@ -763,13 +763,13 @@ async function createNewFile(cli: LayerGitCli, refresh: () => void): Promise<voi
   await vscode.window.showTextDocument(document);
 
   const choice = await vscode.window.showInformationMessage(
-    `Created ${filePath} in buildtree. Adopt this file into layer ${layerName}?`,
+    `Created ${filePath} in buildtree. Apply this file to layer ${layerName}? Applying to another layer adopts the current buildtree file into that layer.`,
     { modal: true },
-    'Adopt and stage',
+    'Apply and stage',
     'Keep as unowned buildtree file'
   );
-  if (choice === 'Adopt and stage') {
-    await runCliAction(cli, workspace, ['adopt', filePath, layerName], refresh);
+  if (choice === 'Apply and stage') {
+    await runCliAction(cli, workspace, ['apply', filePath, '--to', layerName], refresh);
     return;
   }
   refresh();
